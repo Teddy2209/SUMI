@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+'''
+Using robot and scripts to collect data, two camera are mounted on robot arm
+Two cameras are used: an Intel RealSense D435i captures RGB-D data for SLAM at 55 FPS,
+and a webcam records 20 FPS RGB data for training a diffusion model.
+'''
 import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import multiprocessing
@@ -32,7 +36,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 
 # Camera Setup
 H, W = 540,960
-FPS = 55  # Đã lên lại 60Hz vì cấu hình độ phân giải phù hợp
+FPS = 55  
 CAMERA_SERIAL = "317222074902"
 # Robot Setup
 robot_ip = "192.168.2.100"
@@ -41,15 +45,13 @@ MODEL_PATH = "/home/apicoo-ai/pmg/Training_Test_vision/runs/segment/runs/data_tr
 # Gripper Calibration
 GRIPPER_OPEN_MM = 90.0
 GRIPPER_CLOSE_MM =10.0
-# Future Horizon for Action
-
 
 class Rate:
     def __init__(self, hz, name: str = ""):
         self.dt = 1.0 / hz
         self.last_time = time.perf_counter()
         self.name = name
-
+        
     def sleep(self):
         elapsed = time.perf_counter() - self.last_time
         if elapsed < self.dt:
