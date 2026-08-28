@@ -1,0 +1,57 @@
+import cv2
+import numpy as np
+import glob
+import os
+import traceback
+
+CHECKERBOARD = (11, 8)
+SQUARE_SIZE = 0.015
+
+OUTPUT_DIR = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/scripts_BMG/S0_Camera_Calibration/S0_output/intrinsics_matrixes_28082026"
+FPC_IMG_DIR = os.path.join(OUTPUT_DIR, "images", "fpc")
+
+images = sorted(glob.glob(os.path.join(FPC_IMG_DIR, '*.png')))
+
+objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
+objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
+objp *= SQUARE_SIZE
+
+objpoints = []
+imgpoints = []
+valid_images = []
+
+for fname in images:
+    img = cv2.imread(fname)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    
+    # None for flags as in s0_calibrate.py
+    ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
+    if ret:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        corners2 = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
+        
+        # Format for fisheye
+        objpoints.append(objp.reshape(1, -1, 3).astype(np.float64))
+        imgpoints.append(corners2.reshape(1, -1, 2).astype(np.float64))
+        valid_images.append(fname)
+
+print(f"Loaded {len(valid_images)} images. Testing incremental calibrate...")
+
+K = np.zeros((3, 3), dtype=np.float64)
+D = np.zeros((4, 1), dtype=np.float64)
+
+for i in range(2, len(valid_images) + 1):
+    try:
+        K_temp = K.copy()
+        D_temp = D.copy()
+        
+        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW
+        
+        ret_val, mtx, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+            objpoints[:i], imgpoints[:i], gray.shape[::-1], K_temp, D_temp,
+            flags=flags, criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+        )
+    except Exception as e:
+        print(f"CRASH at {i} images! Last image added: {valid_images[i-1]}")
+        traceback.print_exc()
+        break
