@@ -37,30 +37,52 @@ flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW
 
 safe_objpoints = []
 safe_imgpoints = []
-safe_images = []
 
 for i in range(len(valid_images)):
-    # Try adding the current image to the safe list
     test_obj = safe_objpoints + [objpoints_all[i]]
     test_img = safe_imgpoints + [imgpoints_all[i]]
-    
-    if len(test_obj) < 2:
+    if len(test_obj) < 3:
         safe_objpoints = test_obj
         safe_imgpoints = test_img
-        safe_images.append(valid_images[i])
         continue
-
     try:
-        K_temp = K.copy()
-        D_temp = D.copy()
-        cv2.fisheye.calibrate(
-            test_obj, test_img, gray.shape[::-1], K_temp, D_temp,
-            flags=flags, criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
-        )
+        K_temp = np.zeros((3, 3), dtype=np.float64)
+        D_temp = np.zeros((4, 1), dtype=np.float64)
+        cv2.fisheye.calibrate(test_obj, test_img, gray.shape[::-1], K_temp, D_temp, flags=flags)
         safe_objpoints = test_obj
         safe_imgpoints = test_img
-        safe_images.append(valid_images[i])
-    except Exception as e:
-        print(f"Skipping BAD image: {valid_images[i]} due to {e}")
+    except Exception:
+        pass
 
-print(f"Calibration successful with {len(safe_images)} / {len(valid_images)} images!")
+print(f"Calibration with {len(safe_objpoints)} safe images.")
+
+# Test 1: No FIX_PRINCIPAL_POINT
+try:
+    K1 = np.zeros((3, 3), dtype=np.float64)
+    D1 = np.zeros((4, 1), dtype=np.float64)
+    ret1, mtx1, dist1, rvecs1, tvecs1 = cv2.fisheye.calibrate(
+        safe_objpoints, safe_imgpoints, gray.shape[::-1], K1, D1,
+        flags=flags
+    )
+    print("RMSE without FIX_PRINCIPAL_POINT:", ret1)
+    print("K1:", mtx1)
+except Exception as e:
+    print("Crash:", e)
+
+# Test 2: WITH FIX_PRINCIPAL_POINT
+try:
+    K2 = np.zeros((3, 3), dtype=np.float64)
+    # MUST set cx, cy before using FIX_PRINCIPAL_POINT
+    K2[0, 2] = gray.shape[1] / 2.0
+    K2[1, 2] = gray.shape[0] / 2.0
+    
+    D2 = np.zeros((4, 1), dtype=np.float64)
+    flags2 = flags | cv2.fisheye.CALIB_FIX_PRINCIPAL_POINT
+    ret2, mtx2, dist2, rvecs2, tvecs2 = cv2.fisheye.calibrate(
+        safe_objpoints, safe_imgpoints, gray.shape[::-1], K2, D2,
+        flags=flags2
+    )
+    print("RMSE WITH FIX_PRINCIPAL_POINT:", ret2)
+    print("K2:", mtx2)
+except Exception as e:
+    print("Crash:", e)

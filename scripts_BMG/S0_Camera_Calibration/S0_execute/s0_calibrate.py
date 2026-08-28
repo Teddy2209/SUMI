@@ -272,16 +272,61 @@ def calibrate_single_camera(image_dir, json_path, target_shape, use_fisheye=Fals
     print(f"Số ảnh hợp lệ được dùng để giải K, D: {success_count} / {len(images)}")
     
     if use_fisheye:
+        print("\nĐang tiến hành thuật toán lọc ảnh chống crash (Fisheye InitExtrinsics)...")
+        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW | cv2.fisheye.CALIB_FIX_PRINCIPAL_POINT | cv2.fisheye.CALIB_FIX_K3 | cv2.fisheye.CALIB_FIX_K4
+        
+        safe_objpoints = []
+        safe_imgpoints = []
+        
+        for i in range(len(objpoints)):
+            test_obj = safe_objpoints + [objpoints[i]]
+            test_img = safe_imgpoints + [imgpoints[i]]
+            
+            if len(test_obj) < 3: # Cần ít nhất 3 ảnh để calib ổn định
+                safe_objpoints = test_obj
+                safe_imgpoints = test_img
+                continue
+                
+            try:
+                K_temp = np.zeros((3, 3), dtype=np.float64)
+                K_temp[0, 2] = gray_shape[0] / 2.0  # cx (width/2)
+                K_temp[1, 2] = gray_shape[1] / 2.0  # cy (height/2)
+                
+                D_temp = np.zeros((4, 1), dtype=np.float64)
+                cv2.fisheye.calibrate(
+                    test_obj, test_img, gray_shape, K_temp, D_temp,
+                    flags=flags,
+                    criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+                )
+                safe_objpoints = test_obj
+                safe_imgpoints = test_img
+            except Exception as e:
+                print(f"-> Đã tự động loại bỏ 1 ảnh gây suy biến ma trận (Ill-conditioned)")
+        
+        if len(safe_objpoints) < 3:
+            print("Lỗi: Không đủ ảnh hợp lệ để Calib Fisheye. Vui lòng chụp thêm!")
+            return
+            
+        print(f"Đã lọc xong! Sử dụng {len(safe_objpoints)} / {len(objpoints)} ảnh an toàn nhất.")
+        
         K = np.zeros((3, 3), dtype=np.float64)
+        K[0, 2] = gray_shape[0] / 2.0  # cx
+        K[1, 2] = gray_shape[1] / 2.0  # cy
         D = np.zeros((4, 1), dtype=np.float64)
-        
-        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW
-        
         ret, mtx, dist, rvecs, tvecs = cv2.fisheye.calibrate(
-            objpoints, imgpoints, gray_shape, K, D,
+            safe_objpoints, safe_imgpoints, gray_shape, K, D,
             flags=flags,
             criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
         )
+        
+        # Tính toán FOV từ ma trận camera
+        fx = mtx[0, 0]
+        fy = mtx[1, 1]
+        fov_x = np.rad2deg(2 * np.arctan(gray_shape[0] / (2 * fx)))
+        fov_y = np.rad2deg(2 * np.arctan(gray_shape[1] / (2 * fy)))
+        fov_diag = np.rad2deg(2 * np.arctan(np.sqrt(gray_shape[0]**2 + gray_shape[1]**2) / (2 * fx)))
+        print(f"📐 Ước lượng Góc nhìn Fisheye (FOV): Ngang {fov_x:.1f}°, Dọc {fov_y:.1f}°, Chéo {fov_diag:.1f}°")
+        
         model_type = "fisheye"
     else:
         ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray_shape, None, None)

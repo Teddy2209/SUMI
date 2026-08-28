@@ -123,10 +123,11 @@ def check_camera(cam_type):
                 h, w = img.shape[:2]
                 
                 if model_type == "fisheye":
-                    newcameramtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(mtx, dist, (w,h), np.eye(3), balance=1.0)
+                    # Đổi balance=0.0 để crop hết viền đen và phóng to phần nắn phẳng
+                    newcameramtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(mtx, dist, (w,h), np.eye(3), balance=0.0)
                     map1, map2 = cv2.fisheye.initUndistortRectifyMap(mtx, dist, np.eye(3), newcameramtx, (w,h), cv2.CV_16SC2)
                     dst = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
-                    dst_cropped = dst # Fisheye với balance=1.0 không cần crop
+                    dst_cropped = dst # Balance=0.0 đã crop tự động
                 else:
                     newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
                     dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
