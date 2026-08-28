@@ -11,6 +11,7 @@ import queue
 import datetime
 import csv
 import glob
+import shutil
 import numpy as np
 import cv2
 import pyrealsense2 as rs
@@ -25,7 +26,8 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "S1_output")
 
 # Camera Setup
 H, W = 540, 960
-FPS = 60  
+FPS = 60 
+FPS_DATA_TRAINING = 10
 CAMERA_SERIAL = "317222074902"
 
 # Gripper Calibration
@@ -43,7 +45,7 @@ class Rate:
         if elapsed < self.dt:
             time.sleep(self.dt - elapsed)
         else:
-            pass # Skip warning to keep console clean
+            print(f"[Warning] {self.name} is too slow! Elapsed: {elapsed:.4f}s")
         self.last_time = time.perf_counter()
 
 class RealsenseCamera:
@@ -90,7 +92,7 @@ class RealsenseCamera:
         time.sleep(1.0)
 
     def _poll(self):
-        rate = Rate(FPS, name="realsense")
+        rate = Rate(59, name="realsense")
         while self.running:
             try:
                 frames = self.pipeline.wait_for_frames(timeout_ms=100)
@@ -154,10 +156,11 @@ def find_webcam_id():
     return None
 
 class WebcamStream:
-    def __init__(self, target_fps=20):
+    def __init__(self, target_fps):
         self.cam_id = find_webcam_id()
         self.stream = None
         self.frame = None
+        self.frame_id = 0
         self.grabbed = False
         self.stopped = False
         self.lock = threading.Lock()
@@ -176,8 +179,8 @@ class WebcamStream:
         return self
         
     def update(self):
+        rate = Rate(12, "webcam")
         while not self.stopped and self.stream is not None:
-            rate = Rate(20, "webcam")
             if not self.grabbed:
                 self.stop()
             else:
@@ -186,13 +189,14 @@ class WebcamStream:
                     self.grabbed = grabbed
                     if grabbed:
                         self.frame = frame
+                        self.frame_id += 1
             rate.sleep()
 
     def read(self):
         with self.lock:
             if self.frame is not None:
-                return self.frame.copy()
-            return None
+                return self.frame.copy(), self.frame_id
+            return None, -1
             
     def stop(self):
         self.stopped = True
@@ -226,7 +230,7 @@ class SusGrip:
 
     def _run(self):
         while self._running:
-            rate = Rate(60, "gripper")
+            rate = Rate(30, "gripper")
             cmd = None
             try:
                 cmd = self._cmd_queue.get_nowait()
@@ -301,7 +305,9 @@ def main():
     # State tracking
     dataset_state = {
         "dir": None, "rgb_f": None, "depth_f": None, "web_f": None, "assoc_f": None,
-        "gripper_f": None, "gripper_w": None, "writer_thread": None
+        "gripper_f": None, "gripper_w": None, "writer_thread": None,
+        "start_time": 0.0, "frame_count_rs": 0, "frame_count_web": 0,
+        "last_web_frame_id": -1, "last_training_save_time": 0.0
     }
     
     susgrip = None
@@ -314,7 +320,7 @@ def main():
         print("Initializing RealSense (RGB-D)...")
         camera_rs = RealsenseCamera(CAMERA_SERIAL, use_depth=True)
         print("Initializing Webcam...")
-        camera_web = WebcamStream(target_fps=20)
+        camera_web = WebcamStream(target_fps=28)
 
         print("\n" + "=" * 70)
         print("SUMI Data Collector Initialized")
@@ -344,7 +350,7 @@ def main():
             g_state = susgrip.get_gripper_state()
             rs_bgr = camera_rs.get_images()
             depth_data, _ = camera_rs.get_depth_data()
-            web_bgr = camera_web.read()
+            web_bgr, web_frame_id = camera_web.read()
 
             # Visuals
             vis = rs_bgr.copy()
@@ -409,6 +415,12 @@ def main():
                     dataset_state["gripper_w"] = csv.writer(dataset_state["gripper_f"])
                     dataset_state["gripper_w"].writerow(["timestamp", "gripper_state", "gripper_cmd"])
                     
+                    dataset_state["start_time"] = time.time()
+                    dataset_state["frame_count_rs"] = 0
+                    dataset_state["frame_count_web"] = 0
+                    dataset_state["last_web_frame_id"] = -1
+                    dataset_state["last_training_save_time"] = time.time() - (1.0 / FPS_DATA_TRAINING)
+                    
                     dataset_state["writer_thread"] = threading.Thread(target=data_writer_thread)
                     dataset_state["writer_thread"].start()
                     recording = True
@@ -416,6 +428,23 @@ def main():
             elif key == ord("]"):
                 if recording:
                     recording = False
+                    
+                    # Tính toán thông tin Record
+                    duration = time.time() - dataset_state["start_time"]
+                    rs_fps_actual = dataset_state["frame_count_rs"] / duration if duration > 0 else 0
+                    web_fps_actual = dataset_state["frame_count_web"] / duration if duration > 0 else 0
+                    
+                    info_path = os.path.join(dataset_state["dir"], "info.txt")
+                    with open(info_path, "w") as f_info:
+                        f_info.write(f"Record Duration: {duration:.2f} seconds\n")
+                        f_info.write(f"Target FPS (Realsense RGB-D): {FPS}\n")
+                        f_info.write(f"Total Frames (Realsense): {dataset_state['frame_count_rs']}\n")
+                        f_info.write(f"Actual FPS (Realsense): {rs_fps_actual:.2f}\n")
+                        f_info.write(f"----------------------------------\n")
+                        f_info.write(f"Target FPS (Webcam & Gripper): {FPS_DATA_TRAINING}\n")
+                        f_info.write(f"Total Frames (Webcam & Gripper): {dataset_state['frame_count_web']}\n")
+                        f_info.write(f"Actual FPS (Webcam & Gripper): {web_fps_actual:.2f}\n")
+                    
                     print(f"\n>>> LƯU DATASET THÀNH CÔNG: {dataset_state['dir']} <<<")
                     data_queue.put(None)
                     if dataset_state["writer_thread"]: dataset_state["writer_thread"].join()
@@ -442,16 +471,27 @@ def main():
                 ts_sec = time.time()
                 ts_str = f"{ts_sec:.6f}"
                 
+                # Dữ liệu Realsense lưu ở tốc độ vòng lặp chính
                 dataset_state["rgb_f"].write(f"{ts_str} rgb/{ts_str}.png\n")
                 dataset_state["depth_f"].write(f"{ts_str} depth/{ts_str}.png\n")
                 dataset_state["assoc_f"].write(f"{ts_str} rgb/{ts_str}.png {ts_str} depth/{ts_str}.png\n")
+                dataset_state["frame_count_rs"] += 1
                 
-                if web_bgr is not None:
-                    dataset_state["web_f"].write(f"{ts_str} web_rgb/{ts_str}.png\n")
+                # Dữ liệu Training (Webcam & Gripper) lưu đồng bộ ở FPS_DATA_TRAINING
+                save_web_bgr = None
+                dt_training = 1.0 / FPS_DATA_TRAINING
+                if ts_sec - dataset_state["last_training_save_time"] >= dt_training:
+                    # Cập nhật bằng += dt_training thay vì = ts_sec để KHÔNG bị cộng dồn sai số thời gian của vòng lặp
+                    dataset_state["last_training_save_time"] += dt_training
+                    
+                    if web_bgr is not None:
+                        dataset_state["web_f"].write(f"{ts_str} web_rgb/{ts_str}.png\n")
+                        dataset_state["frame_count_web"] += 1
+                        save_web_bgr = web_bgr
+                    
+                    dataset_state["gripper_w"].writerow([ts_sec, float(g_state), float(current_gripper_cmd)])
                 
-                dataset_state["gripper_w"].writerow([ts_sec, float(g_state), float(current_gripper_cmd)])
-                
-                data_queue.put((ts_str, rs_bgr, depth_data, web_bgr, dataset_state["dir"]))
+                data_queue.put((ts_str, rs_bgr, depth_data, save_web_bgr, dataset_state["dir"]))
 
             # Calculate FPS
             curr_loop_time = time.perf_counter()

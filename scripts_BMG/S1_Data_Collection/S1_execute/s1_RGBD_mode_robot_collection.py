@@ -41,7 +41,7 @@ CAMERA_SERIAL = "317222074902"
 # Robot Setup
 robot_ip = "192.168.2.100"
 # AI setup
-MODEL_PATH = "/home/apicoo-ai/pmg/Training_Test_vision/runs/segment/runs/data_training_BinPicking/weights/best.pt"
+MODEL_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/.files/mobile_sam.pt"
 # Gripper Calibration
 GRIPPER_OPEN_MM = 90.0
 GRIPPER_CLOSE_MM =10.0
