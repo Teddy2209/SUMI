@@ -59,6 +59,7 @@ def init_fpc():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
     return cap
 
 def check_camera(cam_type):
@@ -70,13 +71,20 @@ def check_camera(cam_type):
             print(f"Lỗi: {e}")
             return
         json_path = os.path.join(OUTPUT_DIR, "realsense_intrinsics.json")
-    elif cam_type == "fpc":
-        print("\nKhởi động FPC Camera...")
+    elif cam_type == "fpc_fisheye":
+        print("\nKhởi động FPC Camera (Fisheye)...")
         cap = init_fpc()
         if cap is None:
             print("Lỗi: Không tìm thấy FPC Camera.")
             return
-        json_path = os.path.join(OUTPUT_DIR, "fpccamera_intrinsics.json")
+        json_path = os.path.join(OUTPUT_DIR, "fpccamera_fisheye_intrinsics.json")
+    elif cam_type == "fpc_pinhole":
+        print("\nKhởi động FPC Camera (Pinhole)...")
+        cap = init_fpc()
+        if cap is None:
+            print("Lỗi: Không tìm thấy FPC Camera.")
+            return
+        json_path = os.path.join(OUTPUT_DIR, "fpccamera_pinhole_intrinsics.json")
     else:
         print("\nKhởi động Webcam...")
         cap = init_webcam()
@@ -124,15 +132,16 @@ def check_camera(cam_type):
                 
                 if model_type == "fisheye":
                     # Đổi balance=0.0 để crop hết viền đen và phóng to phần nắn phẳng
-                    newcameramtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(mtx, dist, (w,h), np.eye(3), balance=0.0)
+                    newcameramtx = cv2.fisheye.estimateNewCameraMatrixForUndistortRectify(mtx, dist, (w,h), np.eye(3), balance=1.0)
                     map1, map2 = cv2.fisheye.initUndistortRectifyMap(mtx, dist, np.eye(3), newcameramtx, (w,h), cv2.CV_16SC2)
                     dst = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
                     dst_cropped = dst # Balance=0.0 đã crop tự động
                 else:
-                    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
-                    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
-                    x, y, w_roi, h_roi = roi
-                    dst_cropped = dst[y:y+h_roi, x:x+w_roi]
+                    # KHÔNG DÙNG getOptimalNewCameraMatrix vì thuật toán này sẽ cố dịch chuyển quang tâm (cx, cy) 
+                    # để nhét vừa các pixel bị méo, dẫn đến việc khung hình bị lệch hẳn sang 1 bên (viền đen to nhỏ không đều).
+                    # Sử dụng trực tiếp ma trận mtx gốc sẽ giữ đúng sự ĐỐI XỨNG tuyệt đối của ống kính.
+                    dst = cv2.undistort(img, mtx, dist, None, mtx)
+                    dst_cropped = dst
 
                 # Resize lại cho bằng nhau để ghép cho đẹp
                 dst_resized = cv2.resize(dst_cropped, (w, h))
@@ -168,20 +177,24 @@ def _menu():
     print("="*40)
     print("1. Check Realsense")
     print("2. Check Webcam")
-    print("3. Check FPC Camera")
+    print("3. Check FPC Camera (Fisheye)")
+    print("4. Check FPC Camera (Pinhole)")
     print("q. Quit\n")
     try:
         while True:
             c = input("Select: ").strip().lower()
             if c == '1': 
                 check_camera("realsense")
-                print("\n" + "="*40 + "\nMenu: 1. Check RS | 2. Check Web | 3. Check FPC | q. Quit")
+                print("\n" + "="*40 + "\nMenu: 1. RS | 2. Web | 3. FPC (Fisheye) | 4. FPC (Pinhole) | q. Quit")
             elif c == '2': 
                 check_camera("webcam")
-                print("\n" + "="*40 + "\nMenu: 1. Check RS | 2. Check Web | 3. Check FPC | q. Quit")
+                print("\n" + "="*40 + "\nMenu: 1. RS | 2. Web | 3. FPC (Fisheye) | 4. FPC (Pinhole) | q. Quit")
             elif c == '3': 
-                check_camera("fpc")
-                print("\n" + "="*40 + "\nMenu: 1. Check RS | 2. Check Web | 3. Check FPC | q. Quit")
+                check_camera("fpc_fisheye")
+                print("\n" + "="*40 + "\nMenu: 1. RS | 2. Web | 3. FPC (Fisheye) | 4. FPC (Pinhole) | q. Quit")
+            elif c == '4': 
+                check_camera("fpc_pinhole")
+                print("\n" + "="*40 + "\nMenu: 1. RS | 2. Web | 3. FPC (Fisheye) | 4. FPC (Pinhole) | q. Quit")
             elif c == 'q': 
                 break
     except KeyboardInterrupt:

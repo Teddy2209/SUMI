@@ -66,17 +66,26 @@ def init_fpc():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
+    cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
     return cap
 
 def detect_chessboard(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, 
-            cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
+    # Tối ưu: Dùng cv2.findChessboardCornersSB robust hơn cho Fisheye
+    ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, 
+            cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
     if ret:
-        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-        corners2 = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
-        img_drawn = cv2.drawChessboardCorners(img.copy(), CHECKERBOARD, corners2, ret)
+        img_drawn = cv2.drawChessboardCorners(img.copy(), CHECKERBOARD, corners, ret)
         return True, img_drawn
+    else:
+        # Fallback về bản cũ nếu SB thất bại
+        ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, 
+                cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE)
+        if ret:
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+            corners2 = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
+            img_drawn = cv2.drawChessboardCorners(img.copy(), CHECKERBOARD, corners2, ret)
+            return True, img_drawn
     return False, img
 
 def take_data_realsense():
@@ -249,19 +258,20 @@ def calibrate_single_camera(image_dir, json_path, target_shape, use_fisheye=Fals
         if gray_shape is None:
             gray_shape = gray.shape[::-1]
 
-        ret, corners = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
+        ret, corners = cv2.findChessboardCornersSB(gray, CHECKERBOARD, cv2.CALIB_CB_EXHAUSTIVE | cv2.CALIB_CB_ACCURACY)
+        if not ret:
+            ret, corners_fallback = cv2.findChessboardCorners(gray, CHECKERBOARD, None)
+            if ret:
+                criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+                corners = cv2.cornerSubPix(gray, corners_fallback, (11,11), (-1,-1), criteria)
+                
         if ret:
-            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
-            corners2 = cv2.cornerSubPix(gray, corners, (11,11), (-1,-1), criteria)
-            
             if use_fisheye:
-                # Mô hình Fisheye đặc biệt nhạy cảm với định dạng mảng:
-                # BẮT BUỘC phải là (1, N, 3) và kiểu float64, nếu dùng (-1, 1, 3) hoặc float32 sẽ sinh lỗi norm_u1 > 0
                 objpoints.append(objp.reshape(1, -1, 3).astype(np.float64))
-                imgpoints.append(corners2.reshape(1, -1, 2).astype(np.float64))
+                imgpoints.append(corners.reshape(1, -1, 2).astype(np.float64))
             else:
                 objpoints.append(objp)
-                imgpoints.append(corners2)
+                imgpoints.append(corners)
                 
             success_count += 1
 
@@ -272,52 +282,91 @@ def calibrate_single_camera(image_dir, json_path, target_shape, use_fisheye=Fals
     print(f"Số ảnh hợp lệ được dùng để giải K, D: {success_count} / {len(images)}")
     
     if use_fisheye:
-        print("\nĐang tiến hành thuật toán lọc ảnh chống crash (Fisheye InitExtrinsics)...")
-        flags = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW | cv2.fisheye.CALIB_FIX_PRINCIPAL_POINT | cv2.fisheye.CALIB_FIX_K3 | cv2.fisheye.CALIB_FIX_K4
+        print("\n--- BƯỚC 1: Calib an toàn (Cố định K3, K4, cx, cy) & Lọc crash ---")
+        flags_step1 = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW | cv2.fisheye.CALIB_FIX_PRINCIPAL_POINT | cv2.fisheye.CALIB_FIX_K3 | cv2.fisheye.CALIB_FIX_K4
         
         safe_objpoints = []
         safe_imgpoints = []
         
+        # Incremental filter để chống OpenCV crash (InitExtrinsics)
         for i in range(len(objpoints)):
             test_obj = safe_objpoints + [objpoints[i]]
             test_img = safe_imgpoints + [imgpoints[i]]
-            
-            if len(test_obj) < 3: # Cần ít nhất 3 ảnh để calib ổn định
+            if len(test_obj) < 3: 
                 safe_objpoints = test_obj
                 safe_imgpoints = test_img
                 continue
-                
             try:
                 K_temp = np.zeros((3, 3), dtype=np.float64)
-                K_temp[0, 2] = gray_shape[0] / 2.0  # cx (width/2)
-                K_temp[1, 2] = gray_shape[1] / 2.0  # cy (height/2)
-                
+                K_temp[0, 2] = gray_shape[0] / 2.0 
+                K_temp[1, 2] = gray_shape[1] / 2.0 
                 D_temp = np.zeros((4, 1), dtype=np.float64)
-                cv2.fisheye.calibrate(
-                    test_obj, test_img, gray_shape, K_temp, D_temp,
-                    flags=flags,
-                    criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
-                )
+                cv2.fisheye.calibrate(test_obj, test_img, gray_shape, K_temp, D_temp, flags=flags_step1)
                 safe_objpoints = test_obj
                 safe_imgpoints = test_img
-            except Exception as e:
-                print(f"-> Đã tự động loại bỏ 1 ảnh gây suy biến ma trận (Ill-conditioned)")
+            except Exception:
+                print("-> Đã tự động loại bỏ 1 ảnh gây suy biến ma trận (Ill-conditioned)")
         
         if len(safe_objpoints) < 3:
-            print("Lỗi: Không đủ ảnh hợp lệ để Calib Fisheye. Vui lòng chụp thêm!")
-            return
+            print("Lỗi: Không đủ ảnh hợp lệ để Calib Fisheye.")
+            return False
             
-        print(f"Đã lọc xong! Sử dụng {len(safe_objpoints)} / {len(objpoints)} ảnh an toàn nhất.")
+        print(f"Hoàn tất lọc C++ crash. Giữ lại {len(safe_objpoints)} / {len(objpoints)} ảnh.")
         
-        K = np.zeros((3, 3), dtype=np.float64)
-        K[0, 2] = gray_shape[0] / 2.0  # cx
-        K[1, 2] = gray_shape[1] / 2.0  # cy
-        D = np.zeros((4, 1), dtype=np.float64)
-        ret, mtx, dist, rvecs, tvecs = cv2.fisheye.calibrate(
-            safe_objpoints, safe_imgpoints, gray_shape, K, D,
-            flags=flags,
+        # Chạy Step 1
+        K_step1 = np.zeros((3, 3), dtype=np.float64)
+        K_step1[0, 2] = gray_shape[0] / 2.0
+        K_step1[1, 2] = gray_shape[1] / 2.0
+        D_step1 = np.zeros((4, 1), dtype=np.float64)
+        ret_step1, K_step1, D_step1, rvecs1, tvecs1 = cv2.fisheye.calibrate(
+            safe_objpoints, safe_imgpoints, gray_shape, K_step1, D_step1,
+            flags=flags_step1,
             criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
         )
+        print(f"RMSE Bước 1: {ret_step1:.4f} pixels")
+
+        print("\n--- BƯỚC 2: Lọc Outlier theo Reprojection Error ---")
+        errors = []
+        for i in range(len(safe_objpoints)):
+            proj, _ = cv2.fisheye.projectPoints(safe_objpoints[i], rvecs1[i], tvecs1[i], K_step1, D_step1)
+            err = cv2.norm(safe_imgpoints[i], proj, cv2.NORM_L2) / np.sqrt(len(proj[0]))
+            errors.append(err)
+            
+        mean_error = np.mean(errors)
+        threshold = 1.5 * mean_error
+        
+        final_objpoints = []
+        final_imgpoints = []
+        final_rvecs = []
+        final_tvecs = []
+        for i in range(len(safe_objpoints)):
+            if errors[i] <= threshold:
+                final_objpoints.append(safe_objpoints[i])
+                final_imgpoints.append(safe_imgpoints[i])
+                final_rvecs.append(rvecs1[i])
+                final_tvecs.append(tvecs1[i])
+            else:
+                print(f"-> Đã loại outlier với sai số lớn ({errors[i]:.2f} > {threshold:.2f})")
+                
+        print(f"Giữ lại {len(final_objpoints)} ảnh siêu chuẩn.")
+        
+        print("\n--- BƯỚC 3: Calib tinh chỉnh (Thả tự do K3, K4 và tâm quang học) ---")
+        # Bắt buộc phải có CALIB_RECOMPUTE_EXTRINSIC để cập nhật góc xoay (Extrinsics) cùng với Intrinsics trong vòng lặp LM.
+        # Nếu không có cờ này, sai số sẽ vọt lên rất cao do Extrinsics bị đóng băng.
+        flags_step2 = cv2.fisheye.CALIB_RECOMPUTE_EXTRINSIC | cv2.fisheye.CALIB_FIX_SKEW | cv2.fisheye.CALIB_USE_INTRINSIC_GUESS
+        K_final = K_step1.copy()
+        D_final = D_step1.copy()
+        
+        try:
+            ret, mtx, dist, rvecs, tvecs = cv2.fisheye.calibrate(
+                final_objpoints, final_imgpoints, gray_shape, K_final, D_final,
+                flags=flags_step2,
+                criteria=(cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
+            )
+            print("Đã tinh chỉnh thành công (thả tự do K3, K4, cx, cy)!")
+        except Exception as e:
+            print(f"Cảnh báo: Tinh chỉnh mở rộng bị lỗi ({e}). Dùng kết quả Bước 1.")
+            ret, mtx, dist, rvecs, tvecs = ret_step1, K_step1, D_step1, rvecs1, tvecs1
         
         # Tính toán FOV từ ma trận camera
         fx = mtx[0, 0]
