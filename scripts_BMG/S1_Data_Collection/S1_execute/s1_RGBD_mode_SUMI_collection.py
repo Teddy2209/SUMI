@@ -179,7 +179,7 @@ class WebcamStream:
         return self
         
     def update(self):
-        rate = Rate(12, "webcam")
+        rate = Rate(20, "webcam")
         while not self.stopped and self.stream is not None:
             if not self.grabbed:
                 self.stop()
@@ -336,7 +336,7 @@ def main():
 
         # UI Window
         cv2.namedWindow("SUMI Data Collector", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("SUMI Data Collector", 960, 540)
+        cv2.resizeWindow("SUMI Data Collector", 1680, 540)
         
         dt = 1.0 / FPS
         fps_real = 0.0
@@ -359,14 +359,19 @@ def main():
             cv2.putText(vis, status_text, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             cv2.putText(vis, f"FPS: {fps_real:.1f}", (800, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             
-            # Show small web camera PIP
+            # Ghép màn hình ngang (Side-by-side)
             if web_bgr is not None:
+                rs_h = vis.shape[0]
                 web_h, web_w = web_bgr.shape[:2]
-                scale = 0.3
-                small_web = cv2.resize(web_bgr, (int(web_w*scale), int(web_h*scale)))
-                sw_h, sw_w = small_web.shape[:2]
-                vis[10:10+sw_h, 960-sw_w-10:960-10] = small_web
-                cv2.rectangle(vis, (960-sw_w-10, 10), (960-10, 10+sw_h), (255,255,255), 1)
+                
+                # Resize webcam bám theo chiều cao của Realsense
+                new_w = int(web_w * (rs_h / web_h))
+                web_resized = cv2.resize(web_bgr, (new_w, rs_h))
+                
+                cv2.putText(web_resized, "FPC CAMERA", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                
+                # Gộp 2 khung hình
+                vis = np.hstack((vis, web_resized))
 
             cv2.imshow("SUMI Data Collector", vis)
             key = cv2.waitKey(1) & 0xFF

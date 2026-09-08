@@ -54,8 +54,15 @@ def init_webcam():
     return cap
 
 def init_fpc():
-    print("[INFO] Khởi động FPC Camera (SHUNCCM) tại /dev/video0...")
-    cap = cv2.VideoCapture(0, cv2.CAP_V4L2) 
+    idx = find_webcam_id()
+    if idx is None:
+        return None
+    print(f"[INFO] Khởi động FPC Camera (SHUNCCM) tại /dev/video{idx}...")
+    cap = cv2.VideoCapture(idx, cv2.CAP_V4L2) 
+    if not cap.isOpened():
+        cap = cv2.VideoCapture(idx)
+    # Ép dùng định dạng Raw/YUYV (không nén) để hiển thị chuẩn xác nhất
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)
@@ -84,7 +91,8 @@ def check_camera(cam_type):
         if cap is None:
             print("Lỗi: Không tìm thấy FPC Camera.")
             return
-        json_path = os.path.join(OUTPUT_DIR, "fpccamera_pinhole_intrinsics.json")
+        json_path = os.path.join(OUTPUT_DIR, "fpccamera_pinhole_intrinsics_pro.json")
+        #json_path = "/home/apicoo-ai/pmg/Training_Test_vision/data_calib__fpccam/camera_intrinsics.json"
     else:
         print("\nKhởi động Webcam...")
         cap = init_webcam()
@@ -137,11 +145,12 @@ def check_camera(cam_type):
                     dst = cv2.remap(img, map1, map2, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
                     dst_cropped = dst # Balance=0.0 đã crop tự động
                 else:
-                    # KHÔNG DÙNG getOptimalNewCameraMatrix vì thuật toán này sẽ cố dịch chuyển quang tâm (cx, cy) 
-                    # để nhét vừa các pixel bị méo, dẫn đến việc khung hình bị lệch hẳn sang 1 bên (viền đen to nhỏ không đều).
-                    # Sử dụng trực tiếp ma trận mtx gốc sẽ giữ đúng sự ĐỐI XỨNG tuyệt đối của ống kính.
-                    dst = cv2.undistort(img, mtx, dist, None, mtx)
-                    dst_cropped = dst
+                    # Dùng getOptimalNewCameraMatrix với tham số alpha = 1 
+                    # để giữ lại TẤT CẢ các pixel của ảnh gốc, kể cả viền đen. 
+                    # KHÔNG thực hiện cắt (crop) ảnh bằng roi.
+                    newcameramtx, roi = cv2.getOptimalNewCameraMatrix(mtx, dist, (w,h), 1, (w,h))
+                    dst = cv2.undistort(img, mtx, dist, None, newcameramtx)
+                    dst_cropped = dst # Không cắt ảnh, giữ nguyên cả viền đen
 
                 # Resize lại cho bằng nhau để ghép cho đẹp
                 dst_resized = cv2.resize(dst_cropped, (w, h))

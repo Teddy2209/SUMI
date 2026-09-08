@@ -18,6 +18,8 @@ def init_fpc():
     print("[INFO] Khởi động FPC Camera (SHUNCCM) tại /dev/video0...")
     cap = cv2.VideoCapture(0, cv2.CAP_V4L2) 
     
+    # Ép sử dụng định dạng Raw/YUYV (không nén) để đảm bảo chất lượng pixel tốt nhất
+    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V'))
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     cap.set(cv2.CAP_PROP_FPS, 30)

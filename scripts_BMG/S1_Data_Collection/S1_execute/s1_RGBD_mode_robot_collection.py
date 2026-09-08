@@ -32,18 +32,19 @@ from neuromeka import IndyDCP3, OpState
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+OUTPUT_DIR = os.path.join(BASE_DIR, "S1_output")
 
 # Camera Setup
 H, W = 540,960
 FPS = 55  
 CAMERA_SERIAL = "317222074902"
+FPS_DATA_TRAINING = 10
 # Robot Setup
 robot_ip = "192.168.2.100"
 # AI setup
 MODEL_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/.files/mobile_sam.pt"
 # Gripper Calibration
-GRIPPER_OPEN_MM = 90.0
+GRIPPER_OPEN_MM = 120.0
 GRIPPER_CLOSE_MM =10.0
 
 class Rate:
@@ -65,13 +66,13 @@ class robot:
         self.robot = IndyDCP3(robot_ip, 0)
         self.pick_point = None
         self.via_point = None
-        self.place_point = [222.8, -642.5, 78.5, 37.5, 179.0, 90.0]
-        self.home = [-23.887644,-470.4143,209.37445,32.759556,178.70001,92.19685]
+        self.place_point = [383, -492, 91, 45, 179, 95 ]
+        self.home = [-26.591024, -470.6116, 213.57587, 32.75905, 178.69966, 92.19671]
 
         self.latest_q = np.zeros(6, dtype=np.float32)
         self.latest_p = np.zeros(6, dtype=np.float32)
-        self.latest_qdot = np.zeros(6, dtype=np.float32)
-        self.latest_pdot = np.zeros(6, dtype=np.float32)
+        #self.latest_qdot = np.zeros(6, dtype=np.float32)
+        #self.latest_pdot = np.zeros(6, dtype=np.float32)
         self.latest_op_state = 0
         self.full_data_cache = None
         self.lock = threading.Lock()
@@ -91,8 +92,8 @@ class robot:
                     self.full_data_cache = data
                     self.latest_q = np.array(data["q"], dtype=np.float32)
                     self.latest_p = np.array(data["p"], dtype=np.float32)
-                    self.latest_qdot = np.array(data["qdot"], dtype=np.float32)
-                    self.latest_pdot = np.array(data["pdot"], dtype=np.float32)
+                    #self.latest_qdot = np.array(data["qdot"], dtype=np.float32)
+                    #self.latest_pdot = np.array(data["pdot"], dtype=np.float32)
                     self.latest_op_state = int(data.get("op_state", 0))
             except Exception:
                 pass
@@ -134,13 +135,13 @@ class robot:
     def move_to_pick(self):
         print("Moving to Pick position!", self.pick_point)
         with self.socket_lock:
-            self.robot.movel_time(self.pick_point, move_time = 4.0)
+            self.robot.movel_time(self.pick_point, move_time = 5.0)
 
     def move_to_place(self):
         with self.socket_lock:
-            self.robot.movec(self.via_point, self.place_point,vel_ratio=25,acc_ratio=20)
+            self.robot.movec(self.via_point, self.place_point,vel_ratio=15,acc_ratio=20)
 
-    def movel(self, target, vel_ratio=25, acc_ratio=25):
+    def movel(self, target, vel_ratio=15, acc_ratio=25):
         with self.socket_lock:
             self.robot.movel(target, vel_ratio=vel_ratio, acc_ratio=acc_ratio)
 
@@ -162,7 +163,6 @@ class robot:
         self.pick_point = pick_arr.tolist()
         self.place_point = place_arr.tolist()
         self.via_point = via_arr.tolist()
-
 
 class camera:
     def __init__(self, serial_number, use_depth=False):
@@ -261,6 +261,77 @@ class camera:
         except Exception:
             pass
 
+def find_webcam_id():
+    import glob
+    video_paths = glob.glob('/sys/class/video4linux/video*')
+    video_paths.sort(key=lambda x: int(os.path.basename(x).replace('video', '')))
+    for path in video_paths:
+        try:
+            with open(os.path.join(path, 'name'), 'r') as f:
+                name = f.read().strip()
+                if "RealSense" not in name and "Metadata" not in name:
+                    idx = int(os.path.basename(path).replace('video', ''))
+                    print(f"[INFO] Tự động nhận diện Webcam: '{name}' tại /dev/video{idx}")
+                    return idx
+        except Exception:
+            continue
+    print("[WARNING] Không tìm thấy Webcam ngoài! Vui lòng kiểm tra cáp cắm.")
+    return None
+
+class fpc_camera:
+    def __init__(self, target_fps=10):
+        self.cam_id = find_webcam_id()
+        self.stream = None
+        self.frame = None
+        self.frame_id = 0
+        self.grabbed = False
+        self.stopped = False
+        self.lock = threading.Lock()
+        
+        if self.cam_id is not None:
+            self.stream = cv2.VideoCapture(self.cam_id, cv2.CAP_V4L2)
+            self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V'))
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.stream.set(cv2.CAP_PROP_FPS, 30)
+            self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            (self.grabbed, self.frame) = self.stream.read()
+            self.start()
+
+    def start(self):
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+        return self
+        
+    def update(self):
+        rate = Rate(20, "webcam")
+        while not self.stopped and self.stream is not None:
+            (grabbed, frame) = self.stream.read()
+            if grabbed:
+                with self.lock:
+                    self.grabbed = True
+                    self.frame = frame
+                    self.frame_id += 1
+            else:
+                self.grabbed = False
+                print("[WARNING] FPC Camera dropped a frame!")
+            rate.sleep()
+
+    def read(self):
+        with self.lock:
+            if self.frame is not None:
+                return self.frame.copy(), self.frame_id
+            return None, -1
+            
+    def stop(self):
+        self.stopped = True
+        try:
+            if hasattr(self, 'thread'):
+                self.thread.join(timeout=0.2)
+        except Exception:
+            pass
+        if self.stream is not None:
+            self.stream.release()
 
 class gripper:
     def __init__(self):
@@ -332,14 +403,13 @@ class gripper:
         except Exception:
             pass
 
-
 class ai:
     def __init__(self):
         from ultralytics import SAM
         self.sam = SAM('mobile_sam.pt')
         self.sam.to("cuda")
-        self.INTRINSIC_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/ORB_SLAM3/matrix_calib/realsense_flange_louis/camera_intrinsics.json"
-        self.EXTRINSIC_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/ORB_SLAM3/matrix_calib/realsense_flange_louis/eye_in_hand_result.json"
+        self.INTRINSIC_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/Data_calibration/realsense_flange_louis/camera_intrinsics.json"
+        self.EXTRINSIC_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/Data_calibration/realsense_flange_louis/eye_in_hand_result.json"
         self.intrinsic_matrix = None
         self.extrinsic_matrix = None
         self.load_matrix()
@@ -465,23 +535,22 @@ class ai:
 
         return [p_base[0], p_base[1], p_base[2], tcp_pose[3], tcp_pose[4], target_rz]
 
-
-
 # ============================================================
 # SLAM BACKGROUND WRITER
 # ============================================================
-slam_img_queue = queue.Queue()
+data_queue = queue.Queue()
 
-def slam_image_writer():
+def data_writer_thread():
     while True:
         try:
-            task = slam_img_queue.get(timeout=0.1)
+            task = data_queue.get(timeout=0.1)
             if task is None:
                 break
-            ts_str, rgb, depth, save_dir = task
-            bgr = rgb
-            cv2.imwrite(f"{save_dir}/rgb/{ts_str}.png", bgr)
+            ts_str, rgb, depth, web_rgb, save_dir = task
+            cv2.imwrite(f"{save_dir}/rgb/{ts_str}.png", rgb)
             cv2.imwrite(f"{save_dir}/depth/{ts_str}.png", depth)
+            if web_rgb is not None:
+                cv2.imwrite(f"{save_dir}/web_rgb/{ts_str}.png", web_rgb)
         except queue.Empty:
             pass
 
@@ -517,6 +586,9 @@ def main():
 
         print("Initializing camera...")
         camera1 = camera(CAMERA_SERIAL, use_depth=True)
+
+        print("Initializing FPC Webcam...")
+        camera_fpc = fpc_camera(target_fps=10)
 
         print("\n" + "=" * 70)
         print("AI + SLAM Data Collector Initialized")
@@ -611,7 +683,7 @@ def main():
 
             if target_pose is not None:
                 print(f"Commanding robot to move to pose: {target_pose}")
-                indy.pick_point = np.array(target_pose) + np.array([12.5, 0, -30, 0, 0, 0])
+                indy.pick_point = np.array(target_pose) + np.array([0, 0, -15, 0, 0, 0])
                 print("Pick point has been set!", indy.pick_point)
                 #indy.pick_point[3:5] = [0, -179.5]
                 try:
@@ -619,7 +691,7 @@ def main():
                         return
                     indy.move_to_pick()
                     susgrip.open()
-                    for i in range(300):
+                    for i in range(450):
                         if robot_moving["abort"]: return
                         time.sleep(0.01)
                     print("Reached Pick position!")
@@ -662,6 +734,7 @@ def main():
                 g_state = susgrip.get_gripper_state()
                 wrist_bgr = camera1.get_images()
                 depth_data, depth_scale = camera1.get_depth_data()
+                web_bgr, web_frame_id = camera_fpc.read()
 
                 # Visuals
                 wrist_vis = wrist_bgr.copy()
@@ -679,6 +752,20 @@ def main():
                                  f"Z:{current_pose[2]:.1f} Rx:{current_pose[3]:.1f} "
                                  f"Ry:{current_pose[4]:.1f} Rz:{current_pose[5]:.1f}")
                     cv2.putText(wrist_vis, pose_text, (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+
+                # Ghép màn hình ngang (Side-by-side)
+                if web_bgr is not None:
+                    rs_h = wrist_vis.shape[0]
+                    web_h, web_w = web_bgr.shape[:2]
+                    
+                    # Resize webcam bám theo chiều cao của Realsense
+                    new_w = int(web_w * (rs_h / web_h))
+                    web_resized = cv2.resize(web_bgr, (new_w, rs_h))
+                    
+                    cv2.putText(web_resized, "FPC CAMERA", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                    
+                    # Gộp 2 khung hình
+                    wrist_vis = np.hstack((wrist_vis, web_resized))
 
                 curr_loop_time = time.perf_counter()
                 inst_fps = 1.0 / (curr_loop_time - prev_loop_time + 1e-6)
@@ -719,17 +806,31 @@ def main():
                 
                 elif key == ord("["):
                     if not recording:
-                        now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                        current_dataset_dir = os.path.join(OUTPUT_DIR, f"dataset_tum_{now_str}")
+                        now = datetime.datetime.now()
+                        date_folder = now.strftime("Date_%d%m%Y")
+                        time_folder = now.strftime("%H%M%S")
+                        
+                        full_date_dir = os.path.join(OUTPUT_DIR, date_folder)
+                        os.makedirs(full_date_dir, exist_ok=True)
+                        
+                        current_dataset_dir = os.path.join(full_date_dir, f"dataset_{time_folder}")
                         print(f"\n>>> BẮT ĐẦU GHI DATASET: {current_dataset_dir} <<<")
+                        
                         os.makedirs(f"{current_dataset_dir}/rgb", exist_ok=True)
                         os.makedirs(f"{current_dataset_dir}/depth", exist_ok=True)
+                        os.makedirs(f"{current_dataset_dir}/web_rgb", exist_ok=True)
                         
                         slam_state["dir"] = current_dataset_dir
+                        
                         slam_state["rgb_f"] = open(f"{current_dataset_dir}/rgb.txt", "w")
                         slam_state["rgb_f"].write("# timestamp filename\n")
+                        
                         slam_state["depth_f"] = open(f"{current_dataset_dir}/depth.txt", "w")
                         slam_state["depth_f"].write("# timestamp filename\n")
+                        
+                        slam_state["web_f"] = open(f"{current_dataset_dir}/web_rgb.txt", "w")
+                        slam_state["web_f"].write("# timestamp filename\n")
+                        
                         slam_state["assoc_f"] = open(f"{current_dataset_dir}/associations.txt", "w")
                         
                         slam_state["gripper_f"] = open(f"{current_dataset_dir}/gripper_log.csv", "w", newline='')
@@ -740,19 +841,41 @@ def main():
                         slam_state["robot_w"] = csv.writer(slam_state["robot_f"])
                         slam_state["robot_w"].writerow(["timestamp", "q1", "q2", "q3", "q4", "q5", "q6", "x", "y", "z", "u", "v", "w"])
                         
-                        slam_state["writer_thread"] = threading.Thread(target=slam_image_writer)
+                        slam_state["start_time"] = time.time()
+                        slam_state["frame_count_rs"] = 0
+                        slam_state["frame_count_web"] = 0
+                        slam_state["last_training_save_time"] = time.time() - (1.0 / FPS_DATA_TRAINING)
+                        
+                        slam_state["writer_thread"] = threading.Thread(target=data_writer_thread)
                         slam_state["writer_thread"].start()
                         recording = True
                         
                 elif key == ord("]"):
                     if recording:
                         recording = False
-                        print(f"\n>>> LƯU DATASET: {slam_state['dir']} <<<")
-                        slam_img_queue.put(None)
+                        
+                        duration = time.time() - slam_state["start_time"]
+                        rs_fps_actual = slam_state["frame_count_rs"] / duration if duration > 0 else 0
+                        web_fps_actual = slam_state["frame_count_web"] / duration if duration > 0 else 0
+                        
+                        info_path = os.path.join(slam_state["dir"], "info.txt")
+                        with open(info_path, "w") as f_info:
+                            f_info.write(f"Record Duration: {duration:.2f} seconds\n")
+                            f_info.write(f"Target FPS (Realsense RGB-D): {FPS}\n")
+                            f_info.write(f"Total Frames (Realsense): {slam_state['frame_count_rs']}\n")
+                            f_info.write(f"Actual FPS (Realsense): {rs_fps_actual:.2f}\n")
+                            f_info.write(f"----------------------------------\n")
+                            f_info.write(f"Target FPS (Webcam & Gripper): {FPS_DATA_TRAINING}\n")
+                            f_info.write(f"Total Frames (Webcam & Gripper): {slam_state['frame_count_web']}\n")
+                            f_info.write(f"Actual FPS (Webcam & Gripper): {web_fps_actual:.2f}\n")
+                        
+                        print(f"\n>>> LƯU DATASET THÀNH CÔNG: {slam_state['dir']} <<<")
+                        data_queue.put(None)
                         if slam_state["writer_thread"]: slam_state["writer_thread"].join()
                         if slam_state["rgb_f"]: slam_state["rgb_f"].close()
                         if slam_state["depth_f"]: slam_state["depth_f"].close()
                         if slam_state["assoc_f"]: slam_state["assoc_f"].close()
+                        if "web_f" in slam_state and slam_state["web_f"]: slam_state["web_f"].close()
                         if slam_state["gripper_f"]: slam_state["gripper_f"].close()
                         if slam_state["robot_f"]: slam_state["robot_f"].close()
                         
@@ -760,11 +883,12 @@ def main():
                     if recording:
                         recording = False
                         print(f"\n>>> HỦY DATASET: {slam_state['dir']} <<<")
-                        slam_img_queue.put(None)
+                        data_queue.put(None)
                         if slam_state["writer_thread"]: slam_state["writer_thread"].join()
                         if slam_state["rgb_f"]: slam_state["rgb_f"].close()
                         if slam_state["depth_f"]: slam_state["depth_f"].close()
                         if slam_state["assoc_f"]: slam_state["assoc_f"].close()
+                        if "web_f" in slam_state and slam_state["web_f"]: slam_state["web_f"].close()
                         if slam_state["gripper_f"]: slam_state["gripper_f"].close()
                         if slam_state["robot_f"]: slam_state["robot_f"].close()
                         import shutil
@@ -778,14 +902,24 @@ def main():
                     slam_state["rgb_f"].write(f"{ts_str} rgb/{ts_str}.png\n")
                     slam_state["depth_f"].write(f"{ts_str} depth/{ts_str}.png\n")
                     slam_state["assoc_f"].write(f"{ts_str} rgb/{ts_str}.png {ts_str} depth/{ts_str}.png\n")
+                    slam_state["frame_count_rs"] += 1
                     
-                    slam_state["gripper_w"].writerow([ts_sec, float(g_state), float(current_gripper_cmd)])
                     slam_state["robot_w"].writerow([ts_sec] + list(q_deg) + list(p_p_tcp))
                     
-                    # Fix rgb to rgb conversion (wrist_bgr is BGR but our writer expects RGB so we convert or just send it directly if we modify writer)
-                    # wait, wrist_bgr is BGR. slam_image_writer currently expects RGB because it does cvtColor(rgb, COLOR_RGB2BGR).
-                    # I'll just change slam_image_writer to take BGR directly!
-                    slam_img_queue.put((ts_str, wrist_bgr, depth_data, slam_state["dir"]))
+                    # Ghi dữ liệu training (Webcam & Gripper) ở tốc độ FPS_DATA_TRAINING (10Hz)
+                    save_web_bgr = None
+                    dt_training = 1.0 / FPS_DATA_TRAINING
+                    if ts_sec - slam_state.get("last_training_save_time", 0) >= dt_training:
+                        slam_state["last_training_save_time"] += dt_training
+                        
+                        if web_bgr is not None:
+                            slam_state["web_f"].write(f"{ts_str} web_rgb/{ts_str}.png\n")
+                            slam_state["frame_count_web"] += 1
+                            save_web_bgr = web_bgr
+                        
+                        slam_state["gripper_w"].writerow([ts_sec, float(g_state), float(current_gripper_cmd)])
+                    
+                    data_queue.put((ts_str, wrist_bgr, depth_data, save_web_bgr, slam_state["dir"]))
 
                 elapsed = time.perf_counter() - loop_start
                 if elapsed < dt:
@@ -797,7 +931,7 @@ def main():
         collection_thread.start()
 
         cv2.namedWindow("AI + SLAM Collector", cv2.WINDOW_NORMAL)
-        cv2.resizeWindow("AI + SLAM Collector", 960, 540)
+        cv2.resizeWindow("AI + SLAM Collector", 1680, 540)
         while gui_state["running"]:
             if gui_state["image"] is not None:
                 cv2.imshow("AI + SLAM Collector", gui_state["image"])
@@ -814,7 +948,7 @@ def main():
     finally:
         ai_data["is_running"] = False
         if recording:
-            slam_img_queue.put(None)
+            data_queue.put(None)
             if slam_state["writer_thread"]: slam_state["writer_thread"].join()
         if susgrip is not None:
             try: susgrip.stop()
@@ -824,6 +958,9 @@ def main():
             except: pass
         if camera1 is not None:
             try: camera1.stop()
+            except: pass
+        if camera_fpc is not None:
+            try: camera_fpc.stop()
             except: pass
         cv2.destroyAllWindows()
         print("Hardware handles released.")
