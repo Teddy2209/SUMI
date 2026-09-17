@@ -13,7 +13,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 S1_DIR = os.path.join(BASE_DIR, "..", "..", "S1_Data_Collection", "S1_output")
 S2_SLAM_DIR = os.path.join(BASE_DIR, "..", "S2_output_slam")
 OUTPUT_DIR = os.path.join(BASE_DIR, "..", "lerobot_dataset_webcam_slam")
-CALIB_FILE = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/Data_calibration/realsense_see_finger/eye_in_hand_result.json"
+CALIB_FILE = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/scripts_BMG/S0_Camera_Calibration/S0_output/intrinsics_matrixes_28082026/extrinsic_matrixes/fpccamera_to_tool.json"
 
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset

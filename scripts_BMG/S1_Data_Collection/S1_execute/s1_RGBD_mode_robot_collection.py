@@ -38,7 +38,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "S1_output")
 H, W = 540,960
 FPS = 55  
 CAMERA_SERIAL = "317222074902"
-FPS_DATA_TRAINING = 10
+FPS_DATA_TRAINING = 20
 # Robot Setup
 robot_ip = "192.168.2.100"
 # AI setup
@@ -55,10 +55,6 @@ class Rate:
         
     def sleep(self):
         elapsed = time.perf_counter() - self.last_time
-        if elapsed < self.dt:
-            time.sleep(self.dt - elapsed)
-        else:
-            print(f"Loop is too slow: {self.name} {elapsed}")
         self.last_time = time.perf_counter()
 
 class robot:
@@ -66,7 +62,7 @@ class robot:
         self.robot = IndyDCP3(robot_ip, 0)
         self.pick_point = None
         self.via_point = None
-        self.place_point = [383, -492, 91, 45, 179, 95 ]
+        self.place_point = [390, -492, 91, 45, 179, 95 ]
         self.home = [-26.591024, -470.6116, 213.57587, 32.75905, 178.69966, 92.19671]
 
         self.latest_q = np.zeros(6, dtype=np.float32)
@@ -107,9 +103,9 @@ class robot:
         with self.lock:
             return self.latest_p.copy()
 
-    def get_full_data(self):
-        with self.lock:
-            return self.full_data_cache
+    # def get_full_data(self):
+    #     with self.lock:
+    #         return self.full_data_cache
 
     def wait_for_op_state_idle(self, timeout=10.0):
         # Poll from local RAM state cache to prevent blocking the socket lock during robot moves
@@ -135,16 +131,21 @@ class robot:
     def move_to_pick(self):
         print("Moving to Pick position!", self.pick_point)
         with self.socket_lock:
-            self.robot.movel_time(self.pick_point, move_time = 5.0)
+            self.robot.movel_time(self.pick_point, move_time = 4.0)
 
     def move_to_place(self):
         with self.socket_lock:
-            self.robot.movec(self.via_point, self.place_point,vel_ratio=15,acc_ratio=20)
+            self.robot.movec(self.via_point, self.place_point,vel_ratio=20,acc_ratio=20)
 
-    def movel(self, target, vel_ratio=15, acc_ratio=25):
+    def movel(self, target, vel_ratio=20, acc_ratio=20):
         with self.socket_lock:
             self.robot.movel(target, vel_ratio=vel_ratio, acc_ratio=acc_ratio)
-
+    def movehome(self, vel_ratio=20, acc_ratio=20):
+        target = np.array(self.home, dtype=np.float32)
+        target[:3] += np.random.uniform(-50.0, 50.0, 3)
+        print("Moving to Home position!", target)
+        with self.socket_lock:
+            self.robot.movel(target.tolist(), vel_ratio=vel_ratio, acc_ratio=acc_ratio)
     def stop_motion(self):
         with self.socket_lock:
             self.robot.stop_motion()
@@ -304,7 +305,7 @@ class fpc_camera:
         return self
         
     def update(self):
-        rate = Rate(20, "webcam")
+        rate = Rate(30, "webcam")
         while not self.stopped and self.stream is not None:
             (grabbed, frame) = self.stream.read()
             if grabbed:
@@ -684,14 +685,13 @@ def main():
             if target_pose is not None:
                 print(f"Commanding robot to move to pose: {target_pose}")
                 indy.pick_point = np.array(target_pose) + np.array([0, 0, -15, 0, 0, 0])
-                print("Pick point has been set!", indy.pick_point)
                 #indy.pick_point[3:5] = [0, -179.5]
                 try:
                     if robot_moving["abort"]:
                         return
                     indy.move_to_pick()
                     susgrip.open()
-                    for i in range(450):
+                    for i in range(320):
                         if robot_moving["abort"]: return
                         time.sleep(0.01)
                     print("Reached Pick position!")
@@ -699,16 +699,15 @@ def main():
                     indy.calculate_points()
                     start_time = time.perf_counter()
                     indy.move_to_place()
-                    for i in range(700):
+                    for i in range(670):
                         if robot_moving["abort"]: return
                         time.sleep(0.01)
                     print(f"Pick to Place time: {time.perf_counter() - start_time}")
                     susgrip.open()
-                    time.sleep(0.25)
+                    time.sleep(0.2)
                     print("Reached Place position!")
-                    indy.movel(indy.home, vel_ratio=20, acc_ratio=25)
+                    indy.movehome(vel_ratio=30, acc_ratio=30)
                     if robot_moving["abort"]: return
-                    print("Returned to Home!")
                 except Exception as e:
                     print(f"Movement error: {e}")
                 finally:
@@ -796,7 +795,7 @@ def main():
                 elif key == ord("d"):
                     robot_moving["abort"] = False
                     print("Unlocked (Reset Abort). AI execution can resume.")
-                    indy.robot.movel(indy.home, vel_ratio=35, acc_ratio=60)
+                    indy.movehome(vel_ratio=35, acc_ratio=35)
                 elif key == ord("o"):
                     susgrip.open()
                     current_gripper_cmd = 1.0

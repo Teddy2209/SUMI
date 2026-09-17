@@ -20,16 +20,16 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "diffusion_checkpoints_diff_slam_rn34", "checkpoints", "100000", "pretrained_model")
-CALIB_FILE = os.path.join(BASE_DIR, "test", "eye_in_hand_result.json")
+DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps", "checkpoints", "last", "pretrained_model")
+CALIB_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "S0_Camera_Calibration", "S0_output", "intrinsics_matrixes_28082026", "extrinsic_matrixes", "fpccamera_to_tool.json"))
 
 GRIPPER_OPEN_MM = 120.0
-GRIPPER_CLOSE_MM = 30.0
+GRIPPER_CLOSE_MM = 10.0
 
 H, W = 540, 960
 TRAIN_FREQ = 10
 CHUNK_SIZE = 8
-INTERP_STEPS = 30
+INTERP_STEPS = 40
 ROBOT_IP = "192.168.2.100"
 
 # ============================================================
@@ -102,59 +102,67 @@ class robot:
         except Exception:
             pass
 
-class camera:
-    def __init__(self):
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.config.enable_stream(rs.stream.color, W, H, rs.format.rgb8, 60)
-        
-        profile = self.pipeline.start(self.config)
-        
-        try:
-            sensors = profile.get_device().query_sensors()
-            for sensor in sensors:
-                if sensor.supports(rs.option.frames_queue_size):
-                    sensor.set_option(rs.option.frames_queue_size, 1)
-        except Exception:
-            pass
-
-        self.latest_frame = None
-        self.running = True
+class fpc_camera:
+    def __init__(self, target_fps=10):
+        self.cam_id = find_webcam_id()
+        self.stream = None
+        self.frame = None
+        self.frame_id = 0
+        self.grabbed = False
+        self.stopped = False
         self.lock = threading.Lock()
         
-        self.thread = threading.Thread(target=self._poll, daemon=True)
-        self.thread.start()
-        time.sleep(1.0)
+        if self.cam_id is not None:
+            self.stream = cv2.VideoCapture(self.cam_id, cv2.CAP_V4L2)
+            self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V'))
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.stream.set(cv2.CAP_PROP_FPS, 30)
+            self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            (self.grabbed, self.frame) = self.stream.read()
+            self.start()
 
-    def _poll(self):
-        while self.running:
-            try:
-                frames = self.pipeline.wait_for_frames(timeout_ms=100)
-                color_frame = frames.get_color_frame()
-                if color_frame:
-                    img = np.array(color_frame.get_data())
-                    with self.lock:
-                        self.latest_frame = img
-            except Exception:
-                pass
-            time.sleep(0.01)
+    def start(self):
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+        return self
+        
+    def update(self):
+        while not self.stopped and self.stream is not None:
+            (grabbed, frame) = self.stream.read()
+            if grabbed:
+                with self.lock:
+                    self.grabbed = True
+                    self.frame = frame
+                    self.frame_id += 1
+            else:
+                self.grabbed = False
+                print("[WARNING] FPC Camera dropped a frame!")
+        
+    def read(self):
+        with self.lock:
+            if self.frame is not None:
+                return self.frame.copy(), self.frame_id
+            return None, -1
 
     def get_images(self):
         with self.lock:
-            if self.latest_frame is None:
-                return np.zeros((H, W, 3), dtype=np.uint8)
-            return self.latest_frame.copy()
-
+            if self.frame is not None:
+                # Convert BGR (from OpenCV) to RGB (for policy input)
+                return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+            return np.zeros((480, 640, 3), dtype=np.uint8)
+            
     def stop(self):
-        self.running = False
+        self.stopped = True
         try:
-            self.thread.join(timeout=0.2)
+            if hasattr(self, 'thread'):
+                self.thread.join(timeout=0.2)
         except Exception:
             pass
-        try:
-            self.pipeline.stop()
-        except Exception:
-            pass
+        if self.stream is not None:
+            self.stream.release()
+
+camera = fpc_camera
 
 class gripper:
     def __init__(self):
@@ -224,6 +232,23 @@ class gripper:
             self.client.close()
         except Exception:
             pass
+
+def find_webcam_id():
+    import glob
+    video_paths = glob.glob('/sys/class/video4linux/video*')
+    video_paths.sort(key=lambda x: int(os.path.basename(x).replace('video', '')))
+    for path in video_paths:
+        try:
+            with open(os.path.join(path, 'name'), 'r') as f:
+                name = f.read().strip()
+                if "RealSense" not in name and "Metadata" not in name:
+                    idx = int(os.path.basename(path).replace('video', ''))
+                    print(f"[INFO] Tự động nhận diện Webcam: '{name}' tại /dev/video{idx}")
+                    return idx
+        except Exception:
+            continue
+    print("[WARNING] Không tìm thấy Webcam ngoài! Vui lòng kiểm tra cáp cắm.")
+    return None
 
 # ============================================================
 # KINEMATICS & SAFETY
@@ -319,7 +344,7 @@ def main():
     policy = DiffusionPolicy.from_pretrained(args.policy_path, local_files_only=True)
     
     # Speed up inference by reducing denoising steps
-    policy.diffusion.num_inference_steps = 32
+    policy.diffusion.num_inference_steps = 16
 
     policy.to(device)
     policy.eval()
@@ -515,9 +540,10 @@ def main():
             
             # 3. Gửi lần lượt các điểm đã nội suy xuống robot
             chunk_duration = CHUNK_SIZE / TRAIN_FREQ
-            exec_dt = 0.03
-            
-            for i in range(INTERP_STEPS):
+            exec_dt = 0.02
+            a = time.perf_counter()
+            SKIP_POINTS = 0
+            for i in range(SKIP_POINTS, INTERP_STEPS):
                 loop_start = time.perf_counter()
                 
                 target_p = interp_p_phys[i]
@@ -540,7 +566,7 @@ def main():
                 elapsed = time.perf_counter() - loop_start
                 if elapsed < exec_dt:
                     time.sleep(exec_dt - elapsed)
-                    
+            print(f"Execution time: {time.perf_counter()-a}")      
             # 4. Chờ robot di chuyển tới điểm cuối của quỹ đạo (so sánh sai số)
             if args.execute:
                 final_p = interp_p_phys[-1]
@@ -553,7 +579,7 @@ def main():
                     err_trans = np.linalg.norm(p_phys_curr[:3] - final_p[:3])
                     err_rot = np.linalg.norm((p_phys_curr[3:6] - final_p[3:6] + 180) % 360 - 180)
                     
-                    if err_trans < 2.0 and err_rot < 2.0: # Đã nới lỏng: 3mm, 2 độ
+                    if err_trans < 1.0 and err_rot < 1.0: # Đã nới lỏng: 3mm, 2 độ
                         print(f"Target reached! Err_Trans: {err_trans:.1f}mm, Err_Rot: {err_rot:.1f}deg")
                         break
                         

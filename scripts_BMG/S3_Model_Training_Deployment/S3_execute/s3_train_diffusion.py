@@ -2,15 +2,22 @@ import os
 import sys
 import subprocess
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+import argparse
 
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DATASET_DIR = os.path.join(BASE_DIR, "lerobot_dataset_diff_slam")
-OUTPUT_DIR = os.path.join(BASE_DIR, "output_trained", "diffusion_checkpoints_diff_slam_rn34")
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 def main():
+    parser = argparse.ArgumentParser(description="Train Diffusion Policy with LeRobot")
+    parser.add_argument("--dataset_name", type=str, required=True, help="Tên thư mục dataset nằm trong S2_datasets_lerobot (VD: lerobot_dataset_fpccam_slam_10fps)")
+    args = parser.parse_args()
+
+    BASE_DIR = os.path.abspath(os.path.dirname(__file__))
+    S2_DATASETS_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S2_Data_Processing_Standaization", "S2_datasets_lerobot"))
+    DATASET_DIR = os.path.join(S2_DATASETS_DIR, args.dataset_name)
+    OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "output_trained", f"diffusion_checkpoints_{args.dataset_name}"))
+
     if not os.path.exists(DATASET_DIR):
-        print(f"Lỗi: Không tìm thấy dataset tại {DATASET_DIR}. Vui lòng chạy s4 trước.")
+        print(f"Lỗi: Không tìm thấy dataset tại {DATASET_DIR}.")
         sys.exit(1)
 
     cmd = [
@@ -22,10 +29,10 @@ def main():
         f"--dataset.root={DATASET_DIR}",
 
         # Training loop
-        "--steps=150000",
-        "--batch_size=16",
+        "--steps=100000",
+        "--batch_size=32",
         "--eval_freq=-1",
-        "--save_freq=10000",
+        "--save_freq=20000",
         "--save_checkpoint=true",
         "--log_freq=10",
         "--seed=42",
