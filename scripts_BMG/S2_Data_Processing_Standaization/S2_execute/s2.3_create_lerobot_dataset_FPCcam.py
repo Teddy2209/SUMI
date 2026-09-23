@@ -14,7 +14,7 @@ BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 S1_DIR = os.path.join(BASE_DIR, "..", "..", "S1_Data_Collection", "S1_output")
 S2_SLAM_DIR = os.path.join(BASE_DIR, "..", "S2_output_slam")
 # Đường dẫn CALIB_FILE thay đổi thành dạng tương đối
-CALIB_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output", "intrinsics_matrixes_28082026", "extrinsic_matrixes", "fpccamera_to_tool.json")
+CALIB_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output","Date_28082026","calibration_matrices_fpc_camera","fpccamera_to_tool.json")
 
 try:
     from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -22,16 +22,16 @@ except ImportError:
     print("Không tìm thấy lerobot. Hãy chắc chắn bạn đang dùng venv có cài lerobot.")
     exit(1)
 
-def get_all_dataset_dirs():
+def get_all_dataset_dirs(date_str):
     dirs = []
     if not os.path.exists(S1_DIR):
         return dirs
-    for date_d in os.listdir(S1_DIR):
-        date_path = os.path.join(S1_DIR, date_d)
-        if not os.path.isdir(date_path): continue
-        for d in os.listdir(date_path):
-            if d.startswith("dataset_"):
-                dirs.append(os.path.join(date_path, d))
+    date_path = os.path.join(S1_DIR, date_str)
+    if not os.path.isdir(date_path): 
+        return dirs
+    for d in os.listdir(date_path):
+        if d.startswith("dataset_"):
+            dirs.append(os.path.join(date_path, d))
     dirs.sort()
     return dirs
 
@@ -159,21 +159,44 @@ def load_and_interpolate_data(dataset_dir, target_fps):
 
     return img_files, states_10d, actions
 
-def main():
-    parser = argparse.ArgumentParser(description="Tạo dataset LeRobot")
-    parser.add_argument("--fps", type=int, default=10, help="Tần số FPS muốn chuyển đổi cho dataset")
-    args = parser.parse_args()
-    
-    target_fps = args.fps
+from datetime import datetime
 
-    all_dirs = get_all_dataset_dirs()
+def main():
+    if not os.path.exists(S1_DIR):
+        print("Không có thư mục S1_output!")
+        return
+        
+    dates = [d for d in os.listdir(S1_DIR) if d.startswith("Date_") and os.path.isdir(os.path.join(S1_DIR, d))]
+    dates.sort()
+    
+    if not dates:
+        print("Không tìm thấy thư mục Date_... nào trong S1_output!")
+        return
+        
+    print("\n=== CHỌN THƯ MỤC DỮ LIỆU NGUỒN ===")
+    for i, d in enumerate(dates):
+        print(f"{i+1}. {d}")
+    
+    date_idx = int(input(f"Chọn số tương ứng (1-{len(dates)}): ")) - 1
+    if date_idx < 0 or date_idx >= len(dates):
+        print("Lựa chọn không hợp lệ!")
+        return
+    source_date = dates[date_idx]
+    
+    target_fps = input("\nNhập FPS mong muốn (mặc định 10): ")
+    target_fps = int(target_fps) if target_fps.strip() else 10
+
+    all_dirs = get_all_dataset_dirs(source_date)
     if not all_dirs:
-        print("Không có dataset nào trong S1_output!")
+        print(f"Không có dataset nào trong S1_output/{source_date}!")
         return
 
-    OUTPUT_DIR = os.path.join(BASE_DIR, "..","S2_datasets_lerobot", f"lerobot_dataset_fpccam_slam_{target_fps}fps")
+    # Tạo thư mục output Date_ ngày hiện tại
+    now = datetime.now()
+    out_date_folder = now.strftime("Date_%d%m%Y")
+    OUTPUT_DIR = os.path.join(BASE_DIR, "..", "S2_datasets_lerobot", out_date_folder, f"lerobot_dataset_fpccam_slam_{target_fps}fps")
 
-    print(f"Bắt đầu tạo LeRobot Dataset cho Webcam ({target_fps} FPS) từ {len(all_dirs)} episodes...")
+    print(f"\nBắt đầu tạo LeRobot Dataset cho Webcam ({target_fps} FPS) từ {len(all_dirs)} episodes trong {source_date}...")
     
     if os.path.exists(OUTPUT_DIR):
         print(f"Xóa dataset cũ tại {OUTPUT_DIR}...")

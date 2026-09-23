@@ -44,7 +44,7 @@ robot_ip = "192.168.2.100"
 # AI setup
 MODEL_PATH = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/.files/mobile_sam.pt"
 # Gripper Calibration
-GRIPPER_OPEN_MM = 120.0
+GRIPPER_OPEN_MM = 100.0
 GRIPPER_CLOSE_MM =10.0
 
 class Rate:

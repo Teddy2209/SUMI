@@ -30,7 +30,7 @@ except ImportError:
     HAS_CV2 = False
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CALIB_JSON_FILE = os.path.join(BASE_DIR, "..", "..", "..", "Data_calibration", "realsense_flange_louis", "eye_in_hand_result.json")
+CALIB_JSON_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration","S0_output","Date_18092026","calibration_matrices_R_camera", "eye_in_hand_result.json")
 
 def load_json_matrix(file_path):
     with open(file_path, 'r') as f:

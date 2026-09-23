@@ -17,13 +17,13 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "diffusion_checkpoints_diff_slam", "checkpoints", "last", "pretrained_model")
+DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "S3_output", "Date_21092026", "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps", "checkpoints", "last", "pretrained_model")
 
-GRIPPER_OPEN_MM = 120.0
-GRIPPER_CLOSE_MM = 30.0
+GRIPPER_OPEN_MM = 100.0
+GRIPPER_CLOSE_MM = 10.0
 
 H, W = 540,960
-FPS = 20
+FPS = 5
 
 # ============================================================
 # HARDWARE CLASSES (NO ROBOT)
@@ -63,7 +63,7 @@ class camera:
                         self.latest_frame = img
             except Exception:
                 pass
-            time.sleep(0.016)
+            time.sleep(0.05)
 
     def get_images(self):
         with self.lock:
@@ -149,6 +149,85 @@ class gripper:
         except Exception:
             pass
 
+def find_webcam_id():
+    import glob
+    video_paths = glob.glob('/sys/class/video4linux/video*')
+    video_paths.sort(key=lambda x: int(os.path.basename(x).replace('video', '')))
+    for path in video_paths:
+        try:
+            with open(os.path.join(path, 'name'), 'r') as f:
+                name = f.read().strip()
+                if "RealSense" not in name and "Metadata" not in name:
+                    idx = int(os.path.basename(path).replace('video', ''))
+                    print(f"[INFO] Tự động nhận diện Webcam: '{name}' tại /dev/video{idx}")
+                    return idx
+        except Exception:
+            continue
+    print("[WARNING] Không tìm thấy Webcam ngoài! Vui lòng kiểm tra cáp cắm.")
+    return None
+class fpc_camera:
+    def __init__(self, target_fps=10):
+        self.cam_id = find_webcam_id()
+        self.stream = None
+        self.frame = None
+        self.frame_id = 0
+        self.grabbed = False
+        self.stopped = False
+        self.lock = threading.Lock()
+        
+        if self.cam_id is not None:
+            self.stream = cv2.VideoCapture(self.cam_id, cv2.CAP_V4L2)
+            self.stream.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('Y', 'U', 'Y', 'V'))
+            self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            self.stream.set(cv2.CAP_PROP_FPS, 30)
+            self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
+            (self.grabbed, self.frame) = self.stream.read()
+            self.start()
+
+    def start(self):
+        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread.start()
+        return self
+        
+    def update(self):
+        while not self.stopped and self.stream is not None:
+            (grabbed, frame) = self.stream.read()
+            if grabbed:
+                with self.lock:
+                    self.grabbed = True
+                    self.frame = frame
+                    self.frame_id += 1
+            else:
+                self.grabbed = False
+                print("[WARNING] FPC Camera dropped a frame!")
+        
+    def read(self):
+        with self.lock:
+            if self.frame is not None:
+                return self.frame.copy(), self.frame_id
+            return None, -1
+
+    def get_images(self):
+        with self.lock:
+            if self.frame is not None:
+                # Resize to 320x240
+                resized_frame = cv2.resize(self.frame, (320, 240))
+                # Convert BGR (from OpenCV) to RGB (for policy input)
+            #     return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+            # return np.zeros((480, 640, 3), dtype=np.uint8)
+                return cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+            return np.zeros((240, 320, 3), dtype=np.uint8)
+            
+    def stop(self):
+        self.stopped = True
+        try:
+            if hasattr(self, 'thread'):
+                self.thread.join(timeout=0.2)
+        except Exception:
+            pass
+        if self.stream is not None:
+            self.stream.release()
 # ============================================================
 # MAIN INFERENCE LOOP
 # ============================================================
@@ -178,8 +257,8 @@ def main():
     # Initialize Threads
     print("Connecting to SusGrip...")
     susgrip = gripper()
-    print("Initializing Realsense Camera...")
-    cam = camera()
+    print("Initializing fpc Camera...")
+    cam = fpc_camera()
     
     time.sleep(1.0) # Đợi camera
 

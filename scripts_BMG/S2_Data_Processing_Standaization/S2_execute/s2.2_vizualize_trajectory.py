@@ -23,7 +23,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import argparse
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CALIB_JSON_FILE = os.path.join(BASE_DIR, "..", "..", "..", "Data_calibration", "realsense_flange_louis", "eye_in_hand_result.json")
+CALIB_JSON_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration","S0_output","Date_18092026","calibration_matrices_R_camera", "eye_in_hand_result.json")
 
 def load_json_matrix(file_path):
     with open(file_path, 'r') as f:
@@ -78,17 +78,23 @@ def main():
     
     print("\n2. Đang tải dữ liệu quỹ đạo...")
     cam_ts, T_cam_list = load_camera_data(camera_traj_file)
-    rob_ts, T_rob_list = load_robot_data(robot_log_file)
     
-    # Bước 1: Lấy tọa độ Robot ở mốc t=0 (Điểm đầu tiên)
-    # T_base_to_tool_0
-    T_b_e0 = T_rob_list[0]
-    
-    # Bước 2: Tính mốc tọa độ World của SLAM trong hệ Base
-    # Điểm xuất phát của SLAM (t=0) luôn là I (Identity).
-    # Tại t=0, Camera nằm ở: T_b_c0 = T_b_e0 * T_cam2tool
-    # Do đó Gốc tọa độ SLAM (World) so với Base chính là T_b_c0
-    T_base_to_SLAMWorld = T_b_e0 @ T_cam2tool
+    has_robot = os.path.exists(robot_log_file)
+    if has_robot:
+        rob_ts, T_rob_list = load_robot_data(robot_log_file)
+        # Bước 1: Lấy tọa độ Robot ở mốc t=0 (Điểm đầu tiên)
+        # T_base_to_tool_0
+        T_b_e0 = T_rob_list[0]
+        
+        # Bước 2: Tính mốc tọa độ World của SLAM trong hệ Base
+        # Điểm xuất phát của SLAM (t=0) luôn là I (Identity).
+        # Tại t=0, Camera nằm ở: T_b_c0 = T_b_e0 * T_cam2tool
+        # Do đó Gốc tọa độ SLAM (World) so với Base chính là T_b_c0
+        T_base_to_SLAMWorld = T_b_e0 @ T_cam2tool
+    else:
+        print("Không tìm thấy robot_log.csv (Chế độ SUMI). Dùng SLAM World làm gốc tọa độ.")
+        T_base_to_SLAMWorld = np.eye(4)
+        T_rob_list = []
     
     # Bước 3: Ánh xạ toàn bộ quỹ đạo SLAM về hệ Base
     slam_points_in_base = []
@@ -101,7 +107,10 @@ def main():
     slam_points_in_base = np.array(slam_points_in_base)
     
     # Tọa độ Tool thực tế của Robot (để so sánh đối chiếu)
-    robot_tool_points = np.array([T[:3, 3] for T in T_rob_list])
+    if has_robot:
+        robot_tool_points = np.array([T[:3, 3] for T in T_rob_list])
+    else:
+        robot_tool_points = np.array([])
     
     # Do camera và tool cách nhau một khoảng t_cam2tool, ta có thể tính quỹ đạo Tool từ SLAM
     # T_base_to_tool = T_base_to_cam * T_cam_to_tool^-1
@@ -118,8 +127,9 @@ def main():
     ax = fig.add_subplot(111, projection='3d')
     
     # Vẽ quỹ đạo Robot (Thực tế của tay máy)
-    ax.plot(robot_tool_points[:, 0], robot_tool_points[:, 1], robot_tool_points[:, 2], 
-            label='Robot Kinematics (Tool)', color='blue', linewidth=3, alpha=0.6)
+    if has_robot:
+        ax.plot(robot_tool_points[:, 0], robot_tool_points[:, 1], robot_tool_points[:, 2], 
+                label='Robot Kinematics (Tool)', color='blue', linewidth=3, alpha=0.6)
             
     # Vẽ quỹ đạo SLAM (dự đoán vị trí Tool)
     ax.plot(slam_tool_points[:, 0], slam_tool_points[:, 1], slam_tool_points[:, 2], 

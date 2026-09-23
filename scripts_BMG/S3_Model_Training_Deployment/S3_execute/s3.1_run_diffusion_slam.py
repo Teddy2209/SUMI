@@ -20,10 +20,10 @@ from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps", "checkpoints", "last", "pretrained_model")
-CALIB_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "S0_Camera_Calibration", "S0_output", "intrinsics_matrixes_28082026", "extrinsic_matrixes", "fpccamera_to_tool.json"))
+DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "S3_output", "Date_21092026", "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps_v2", "checkpoints", "last", "pretrained_model")
+CALIB_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "S0_Camera_Calibration", "S0_output","Date_28082026","calibration_matrices_fpc_camera","fpccamera_to_tool.json"))
 
-GRIPPER_OPEN_MM = 120.0
+GRIPPER_OPEN_MM = 100.0
 GRIPPER_CLOSE_MM = 10.0
 
 H, W = 540, 960
@@ -148,9 +148,13 @@ class fpc_camera:
     def get_images(self):
         with self.lock:
             if self.frame is not None:
+                # Resize to 320x240
+                # resized_frame = cv2.resize(self.frame, (320, 240))
                 # Convert BGR (from OpenCV) to RGB (for policy input)
-                return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+                 return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
             return np.zeros((480, 640, 3), dtype=np.uint8)
+            #     return cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
+            # return np.zeros((240, 320, 3), dtype=np.uint8)
             
     def stop(self):
         self.stopped = True
