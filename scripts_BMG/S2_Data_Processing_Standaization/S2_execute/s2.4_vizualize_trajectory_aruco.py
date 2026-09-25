@@ -140,7 +140,8 @@ def detect_marker_pose(image_path, K, D):
 def main():
     parser = argparse.ArgumentParser(description="Visualize SLAM trajectory relative to ArUco marker.")
     parser.add_argument("--path", required=True, help="Path to dataset, e.g. Date_09092026/dataset_110627")
-    parser.add_argument("--num_frames", type=int, default=30, help="Number of frames to scan for marker averaging")
+    parser.add_argument("--no_show", action="store_true", help="Do not show plot")
+    parser.add_argument("--num_frames", type=int, default=200, help="Number of frames to scan for marker averaging")
     args = parser.parse_args()
 
     camera_traj_file = os.path.join(BASE_DIR, "..", "S2_output_slam", args.path, "SmoothedCameraTrajectory.txt")
@@ -264,7 +265,8 @@ def main():
     print(f"Đã lưu ảnh vẽ 3D tại: {out_img}")
     
     print("\nĐang hiển thị cửa sổ 3D...")
-    plt.show()
+    if not args.no_show:
+        plt.show()
 
 if __name__ == "__main__":
     main()
