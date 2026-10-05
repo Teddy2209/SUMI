@@ -1,25 +1,52 @@
 #!/usr/bin/env python3
+"""
+Train ACT Policy (Absolute Cartesian SLAM) với LeRobot.
+
+Tính năng:
+  - Tự động detect & resume từ checkpoint cũ nếu `--output_dir` đã tồn tại.
+  - Cấu trúc lại code rõ ràng, thêm argparse để dễ điều khiển.
+"""
+
 import os
 import sys
 import subprocess
+import argparse
 from pathlib import Path
 
-def main():
-    # ======================================================================
-    # Path configuration
-    # ======================================================================
-    repo_id = "apicoo/robot_pick_place"
-    dataset_dir = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/ORB_SLAM3/lerobot_dataset_act_slam"
-    output_dir = Path("/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/ORB_SLAM3/output_trained/act_checkpoints_act_slam_v2")
+# ======================================================================
+# ARGPARSE & CONFIG
+# ======================================================================
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train ACT Policy with LeRobot (Absolute)")
     
+    parser.add_argument("--dataset_name", type=str, required=True,
+                        help="Tên thư mục dataset nằm trong S2_datasets_lerobot (VD: Date_01102026/lerobot_dataset_...)")
+    parser.add_argument("--output_name", type=str, default="act_slam",
+                        help="Tên thư mục output trong S3_output (Mặc định: act_slam)")
+    
+    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--steps", type=int, default=150000, help="Số bước huấn luyện")
+    parser.add_argument("--gpu_id", type=str, default="1", help="CUDA_VISIBLE_DEVICES ID")
+    
+    return parser.parse_args()
+
+# ======================================================================
+# MAIN ROUTING
+# ======================================================================
+def main():
+    args = parse_args()
+    
+    BASE_DIR = Path(__file__).resolve().parent
+    dataset_dir = (BASE_DIR / ".." / ".." / "S2_Data_Processing_Standaization" / "S2_datasets_lerobot" / args.dataset_name).resolve()
+    output_dir = (BASE_DIR / ".." / "S3_output" / args.output_name).resolve()
+    repo_id = "apicoo/robot_pick_place"
+
+    if not dataset_dir.exists():
+        print(f"❌ Lỗi: Không tìm thấy dataset tại {dataset_dir}.")
+        sys.exit(1)
+
     if output_dir.exists() and not any(output_dir.iterdir()):
         output_dir.rmdir()
-
-    print("======================================================================")
-    print("Launching ACT Training with GPU (Based on your Custom Script)")
-    print(f"Dataset : {dataset_dir}")
-    print(f"Output  : {output_dir}")
-    print("======================================================================")
 
     # ======================================================================
     # Environment Variables
@@ -27,12 +54,12 @@ def main():
     env = os.environ.copy()
     env["QT_QPA_PLATFORM"] = "offscreen"
     env["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
-    env["CUDA_VISIBLE_DEVICES"] = "1"
+    env["CUDA_VISIBLE_DEVICES"] = args.gpu_id
     env["MASTER_PORT"] = "29505"
     env["HF_HUB_OFFLINE"] = "1"
 
     # ======================================================================
-    # Base Command (Sử dụng argparse style `--key=value`)
+    # Base Command
     # ======================================================================
     cmd = [
         sys.executable, "-m", "lerobot.scripts.lerobot_train",
@@ -44,15 +71,13 @@ def main():
         # Policy Config (Sử dụng ACT)
         "--policy.type=act",
         "--policy.device=cuda",
-        
-        # Output Config
         f"--output_dir={output_dir}",
         
-        # Hyperparameters từ script cũ
-        "--batch_size=32",
+        # Hyperparameters
+        f"--batch_size={args.batch_size}",
         "--num_workers=16",
         
-        # Bật Temporal Ensembling (Nội suy quỹ đạo trung bình) giống hệt bài báo ACT gốc
+        # Temporal Ensembling 
         "--policy.chunk_size=100",
         "--policy.n_action_steps=1",
         "--policy.temporal_ensemble_coeff=0.01",
@@ -60,17 +85,17 @@ def main():
         "--policy.pretrained_backbone_weights=ResNet34_Weights.IMAGENET1K_V1",
         "--policy.n_decoder_layers=7",
         
-        # Enable VAE for Multi-Position Distribution Generalization
+        # Multi-Position Generalization
         "--policy.use_vae=true",
         
-        # Mitigate Overfitting Gradient Explosion
-        "--steps=150000",
+        # Training Schedule
+        f"--steps={args.steps}",
         "--save_freq=30000",
         "--log_freq=500",
         "--save_checkpoint=true",
         "--eval_freq=-1",
         
-        # Disable wandb & push to hub
+        # Disable external upload
         "--wandb.enable=false",
         "--policy.push_to_hub=false"
     ]
@@ -78,30 +103,29 @@ def main():
     # ======================================================================
     # Auto-Resume Logic
     # ======================================================================
+    resume_mode = False
     last_checkpoint_cfg = output_dir / "checkpoints" / "last" / "pretrained_model" / "train_config.json"
+    
     if last_checkpoint_cfg.exists():
         print(f"\n[INFO] Found existing checkpoint config at {last_checkpoint_cfg}. Resuming training!")
-        cmd = [
-            sys.executable, "-m", "lerobot.scripts.lerobot_train",
-            f"--config_path={last_checkpoint_cfg}",
-            "--resume=true"
-        ]
+        cmd.extend([f"--config_path={last_checkpoint_cfg}", "--resume=true"])
+        resume_mode = True
     elif output_dir.exists():
         # Fallback to the latest step checkpoint if "last" doesn't exist
         step_checkpoints = list(output_dir.glob("checkpoints/*/pretrained_model/train_config.json"))
         if step_checkpoints:
             latest_cfg = sorted(step_checkpoints)[-1]
             print(f"\n[INFO] Found step checkpoint config at {latest_cfg}. Resuming training!")
-            cmd = [
-                sys.executable, "-m", "lerobot.scripts.lerobot_train",
-                f"--config_path={latest_cfg}",
-                "--resume=true"
-            ]
+            cmd.extend([f"--config_path={latest_cfg}", "--resume=true"])
+            resume_mode = True
 
-    # Display the command to run
-    cmd_str = " \\\n  ".join(cmd)
-    print("Command to execute:")
-    print(f"QT_QPA_PLATFORM=offscreen PYTORCH_ALLOC_CONF=expandable_segments:True CUDA_VISIBLE_DEVICES={env.get('CUDA_VISIBLE_DEVICES', '0')} \\\n{cmd_str}\n")
+    print("\n" + "=" * 70)
+    print(f"🚀 BẮT ĐẦU HUẤN LUYỆN ACT POLICY ({'RESUME' if resume_mode else 'NEW'})")
+    print("=" * 70)
+    print(f"  Dataset: {dataset_dir}")
+    print(f"  Output : {output_dir}")
+    print(f"  Command:\n  {' '.join(cmd)}")
+    print("=" * 70 + "\n")
     
     # Run the training process
     try:

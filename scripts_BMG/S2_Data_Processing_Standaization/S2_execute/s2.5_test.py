@@ -17,7 +17,7 @@ def pose_to_matrix(tx, ty, tz, qx, qy, qz, qw):
 # ===================================================================
 # 1. LOAD DỮ LIỆU THỰC TẾ
 # ===================================================================
-CALIB_FILE = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/scripts_BMG/S0_Camera_Calibration/S0_output/Date_28082026/calibration_matrices_fpc_camera/fpccamera_to_tool.json"
+CALIB_FILE = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/scripts_BMG/S0_Camera_Calibration/S0_output/Date_18092026/calibration_matrices_RS_camera/eye_in_hand_result.json"
 TRAJECTORY_FILE = "/media/apicoo-ai/5511010c-3660-41c3-b501-36e739767b6a/SUMI/scripts_BMG/S2_Data_Processing_Standaization/S2_output_slam/Date_23092026/dataset_181031/CameraTrajectory.txt"
 
 # Đọc ma trận Eye-in-Hand thực tế
@@ -43,8 +43,9 @@ T_world_cam_1 = pose_to_matrix(tx1, ty1, tz1, qx1, qy1, qz1, qw1)
 # ===================================================================
 # 2. TÍNH TOÁN THEO CÁCH CŨ (DỮ LIỆU THỰC TẾ CỦA BẠN)
 # ===================================================================
-T_world_tool_0 = T_world_cam_0 @ T_cam_to_tool
-T_world_tool_1 = T_world_cam_1 @ T_cam_to_tool
+T_tool_to_cam = np.linalg.inv(T_cam_to_tool)  # JSON lưu G_T_C → đảo để có C_T_G
+T_world_tool_0 = T_world_cam_0 @ T_tool_to_cam
+T_world_tool_1 = T_world_cam_1 @ T_tool_to_cam
 
 print("="*70)
 print("DỮ LIỆU CŨ: TỌA ĐỘ TOOL TRONG HỆ SLAM WORLD (TUYỆT ĐỐI)")

@@ -15,6 +15,8 @@ import sys
 import shutil
 import time
 
+from s2_menu import choose_path
+
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
@@ -107,11 +109,16 @@ def run_slam_for_dataset(ds_rel_path):
 # ═══════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="Khởi chạy ORB-SLAM3")
-    parser.add_argument("--path", required=True, help="Đường dẫn đến dataset hoặc thư mục Date (VD: Date_27082026/dataset_104821 OR Date_27082026)")
+    parser.add_argument("--path", default=None, help="Đường dẫn đến dataset hoặc thư mục Date (VD: Date_27082026/dataset_104821 OR Date_27082026). Bỏ trống để mở menu chọn")
     args = parser.parse_args()
 
-    target_path = os.path.join(S1_OUTPUT_DIR, args.path)
-    
+    rel_path = args.path or choose_path(S1_OUTPUT_DIR)
+    if not rel_path:
+        print("[!] Không có lựa chọn hợp lệ!")
+        sys.exit(1)
+
+    target_path = os.path.join(S1_OUTPUT_DIR, rel_path)
+
     if not os.path.exists(target_path):
         print(f"[!] Lỗi: Không tìm thấy thư mục input: {target_path}")
         sys.exit(1)
@@ -119,7 +126,7 @@ def main():
     # Nếu là 1 dataset
     if os.path.basename(target_path).startswith("dataset_"):
         print(f"\n>>> CHẾ ĐỘ: CHẠY SLAM CHO 1 DATASET <<<")
-        run_slam_for_dataset(args.path)
+        run_slam_for_dataset(rel_path)
     
     # Nếu là thư mục Date (chứa nhiều dataset)
     else:
@@ -133,8 +140,7 @@ def main():
         print(f"\n>>> CHẾ ĐỘ: CHẠY HÀNG LOẠT ({len(datasets)} datasets) <<<")
         
         for ds_name in datasets:
-            rel_path = os.path.join(args.path, ds_name)
-            run_slam_for_dataset(rel_path)
+            run_slam_for_dataset(os.path.join(rel_path, ds_name))
 
     print("\n>>> HOÀN THÀNH CHẠY BATCH SLAM! <<<")
 

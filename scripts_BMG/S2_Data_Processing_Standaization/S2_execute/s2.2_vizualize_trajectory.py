@@ -22,6 +22,8 @@ matplotlib.use('Agg') # Tránh xung đột Qt/cv2 khi chạy tự động
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+from s2_menu import choose_path
+
 try:
     import cv2
     HAS_CV2 = True
@@ -34,7 +36,7 @@ except ImportError:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 S1_OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S1_Data_Collection", "S1_output"))
 S2_OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "S2_output_slam"))
-CALIB_JSON_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output", "Date_18092026", "calibration_matrices_R_camera", "eye_in_hand_result.json"))
+CALIB_JSON_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output", "Date_18092026", "calibration_matrices_RS_camera", "eye_in_hand_result.json"))
 
 # ═══════════════════════════════════════════════════════════════
 # HELPER FUNCTIONS
@@ -236,19 +238,24 @@ def slideshow_mode(date_folder):
 # ═══════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="Trực quan hóa quỹ đạo SLAM")
-    parser.add_argument("--path", required=True, help="Đường dẫn đến dataset hoặc thư mục Date (VD: Date_27082026/dataset_104821)")
+    parser.add_argument("--path", default=None, help="Đường dẫn đến dataset hoặc thư mục Date (VD: Date_27082026/dataset_104821). Bỏ trống để mở menu chọn")
     parser.add_argument("--slideshow", action="store_true", help="Bật chế độ trình chiếu ảnh đã lưu")
     args = parser.parse_args()
 
-    target_path = os.path.join(S2_OUTPUT_DIR, args.path)
-    
+    rel_path = args.path or choose_path(S2_OUTPUT_DIR)
+    if not rel_path:
+        print("[!] Không có lựa chọn hợp lệ!")
+        sys.exit(1)
+
+    target_path = os.path.join(S2_OUTPUT_DIR, rel_path)
+
     if args.slideshow:
         print("\n>>> CHẾ ĐỘ: TRÌNH CHIẾU SLIDESHOW <<<")
         # Phải là thư mục Date thì mới xem dạng slideshow hợp lý
         if os.path.basename(target_path).startswith("dataset_"):
-            slideshow_mode(os.path.dirname(args.path))
+            slideshow_mode(os.path.dirname(rel_path))
         else:
-            slideshow_mode(args.path)
+            slideshow_mode(rel_path)
         return
 
     if not os.path.exists(target_path):
@@ -258,17 +265,16 @@ def main():
     # Chạy 1 dataset
     if os.path.basename(target_path).startswith("dataset_"):
         print(f"\n>>> CHẾ ĐỘ: TRỰC QUAN HÓA 1 DATASET <<<")
-        process_single_dataset(args.path)
-    
+        process_single_dataset(rel_path)
+
     # Chạy hàng loạt
     else:
         datasets = [d for d in os.listdir(target_path) if os.path.isdir(os.path.join(target_path, d)) and d.startswith("dataset_")]
         datasets.sort()
         print(f"\n>>> CHẾ ĐỘ: TRỰC QUAN HÓA HÀNG LOẠT ({len(datasets)} datasets) <<<")
-        
+
         for ds_name in datasets:
-            rel_path = os.path.join(args.path, ds_name)
-            process_single_dataset(rel_path)
+            process_single_dataset(os.path.join(rel_path, ds_name))
 
     print("\n>>> HOÀN THÀNH! <<<")
 

@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Tạo LeRobot Dataset (Tuyệt Đối) từ dữ liệu gốc.
+Tạo LeRobot Dataset (hệ SLAM World) từ dữ liệu gốc.
 
 Chức năng:
   - Đồng bộ hóa dữ liệu từ FPC Camera, Side Camera, Gripper và SLAM.
   - Nội suy (interpolation) dữ liệu để đạt chuẩn target FPS.
-  - Lưu trạng thái Action và State dưới dạng tọa độ TUYỆT ĐỐI (Base Frame).
+  - Lưu State/Action là pose tool TUYỆT ĐỐI trong hệ SLAM World (gốc = camera lúc bắt đầu SLAM).
+    Pose tool tại frame 0 KHÔNG phải đơn vị mà bằng T_tool_to_cam (offset eye-in-hand).
   - Tích hợp ghi đè hoặc nối tiếp (append) các episodes.
 """
 
 import os
-import glob
 import json
 import shutil
 from datetime import datetime
@@ -35,7 +35,7 @@ except ImportError:
 BASE_DIR = os.path.abspath(os.path.dirname(__file__))
 S1_DIR = os.path.join(BASE_DIR, "..", "..", "S1_Data_Collection", "S1_output")
 S2_SLAM_DIR = os.path.join(BASE_DIR, "..", "S2_output_slam")
-CALIB_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output", "Date_28082026", "calibration_matrices_fpc_camera", "fpccamera_to_tool.json")
+CALIB_FILE = os.path.join(BASE_DIR, "..", "..", "S0_Camera_Calibration", "S0_output", "Date_18092026", "calibration_matrices_RS_camera", "eye_in_hand_result.json")
 
 # ═══════════════════════════════════════════════════════════════
 # HELPER FUNCTIONS
@@ -146,7 +146,7 @@ def load_and_interpolate_data(dataset_dir, target_fps):
 
     with open(CALIB_FILE, 'r') as f:
         calib_data = json.load(f)
-    T_cam_to_tool = np.array(calib_data["T_cam_to_tool"])
+    T_tool_to_cam = np.linalg.inv(np.array(calib_data["T_cam_to_tool"]))  # JSON lưu G_T_C → đảo để có C_T_G
 
     trans = interp_slam[:, :3]
     quats = interp_slam[:, 3:]
@@ -160,7 +160,7 @@ def load_and_interpolate_data(dataset_dir, target_fps):
         T_world_cam[:3, :3] = rot_matrices[i]
         T_world_cam[:3, 3] = trans[i]
 
-        T_world_tool = T_world_cam @ T_cam_to_tool
+        T_world_tool = T_world_cam @ T_tool_to_cam
         pos = T_world_tool[:3, 3]
         rot_tool = T_world_tool[:3, :3]
 
@@ -225,7 +225,7 @@ def main():
     out_date_folder = datetime.now().strftime("Date_%d%m%Y")
     OUTPUT_DIR = os.path.join(BASE_DIR, "..", "S2_datasets_lerobot", out_date_folder, f"lerobot_dataset_fpccam_slam_{target_fps}fps_320x240")
 
-    print(f"\nBắt đầu tạo LeRobot Dataset (TUYỆT ĐỐI) cho Webcam ({target_fps} FPS - 320x240) từ {len(all_dirs)} episodes trong {source_date}...")
+    print(f"\nBắt đầu tạo LeRobot Dataset (hệ SLAM World) cho Webcam ({target_fps} FPS - 320x240) từ {len(all_dirs)} episodes trong {source_date}...")
     
     append_mode = False
     if os.path.exists(OUTPUT_DIR):

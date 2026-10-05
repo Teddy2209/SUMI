@@ -1,44 +1,70 @@
+#!/usr/bin/env python3
 """
-Train Diffusion Policy with UMI-style relative-to-current conversion.
+Train Diffusion Policy với tọa độ UMI Relative.
 
-Monkey-patches LeRobot's make_dataset to wrap with UMIRelativeDataset,
-then runs the standard LeRobot training pipeline.
-
-Usage:
-    python s3_train_diffusion_umi_rel.py --dataset_name <name>
+Cơ chế:
+  - Khác với Absolute, mô hình này học cách predict toạ độ đích RELATIVE so với tọa độ tay hiện tại.
+  - Dùng dataset TUYỆT ĐỐI (s2.4 không _rel); `s3_umi_relative_wrapper.py` đổi sang inv(T_hiện_tại) @ T_i
+    ở runtime bằng cách patch `make_dataset` của LeRobot (obs, action, và normalization stats).
+  - Inference tương ứng: s3.1_run_diffusion_320x240_EMA_rel.py.
+  - Tham số không khai báo ở đây được truyền thẳng cho LeRobot (VD: --num_workers=8).
 """
 
 import os
 import sys
+import argparse
+from datetime import datetime
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
-
-def main():
-    import argparse
+# ======================================================================
+# ARGPARSE & CONFIG
+# ======================================================================
+def parse_args():
     parser = argparse.ArgumentParser(description="Train Diffusion Policy (UMI Relative)")
+    
     parser.add_argument("--dataset_name", type=str, required=True,
                         help="Dataset folder name inside S2_datasets_lerobot")
-    args, remaining_args = parser.parse_known_args()
+    parser.add_argument("--backbone", type=str, default="resnet18", choices=["resnet18", "resnet34", "resnet50"],
+                        help="Vision backbone architecture (default: resnet18)")
+    parser.add_argument("--batch_size", type=int, default=128, 
+                        help="Batch size (default: 128)")
+    parser.add_argument("--steps", type=int, default=5000000, 
+                        help="Số bước huấn luyện (default: 5M)")
+    parser.add_argument("--gpu_id", type=str, default="1", 
+                        help="CUDA_VISIBLE_DEVICES ID (default: 1)")
+    
+    # Auto-resume
+    parser.add_argument("--resume_dir", type=str, default=None, 
+                        help="Đường dẫn đến thư mục Output cũ nếu muốn train tiếp")
+    
+    return parser.parse_known_args()
+
+# ======================================================================
+# MAIN ROUTING
+# ======================================================================
+def main():
+    args, remaining_args = parse_args()
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_id
 
     BASE_DIR = os.path.abspath(os.path.dirname(__file__))
-    S2_DATASETS_DIR = os.path.abspath(os.path.join(
-        BASE_DIR, "..", "..", "S2_Data_Processing_Standaization", "S2_datasets_lerobot"
-    ))
+    S2_DATASETS_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S2_Data_Processing_Standaization", "S2_datasets_lerobot"))
     DATASET_DIR = os.path.join(S2_DATASETS_DIR, args.dataset_name)
 
-    from datetime import datetime
-    out_date_folder = datetime.now().strftime("Date_%d%m%Y")
-    dataset_basename = os.path.basename(args.dataset_name)
-    OUTPUT_DIR = os.path.abspath(os.path.join(
-        BASE_DIR, "..", "S3_output", out_date_folder,
-        f"diffusion_umi_rel_{dataset_basename}"
-    ))
-
     if not os.path.exists(DATASET_DIR):
-        print(f"Lỗi: Không tìm thấy dataset tại {DATASET_DIR}.")
+        print(f"❌ Lỗi: Không tìm thấy dataset tại {DATASET_DIR}.")
         sys.exit(1)
 
-    # --- Monkey-patch make_dataset ---
+    # ─── Xử lý đường dẫn Output & Resume ───
+    if args.resume_dir:
+        OUTPUT_DIR = os.path.abspath(args.resume_dir)
+        resume_flag = "true"
+    else:
+        out_date_folder = datetime.now().strftime("Date_%d%m%Y")
+        dataset_basename = os.path.basename(args.dataset_name)
+        OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "S3_output", out_date_folder, f"diffusion_umi_rel_{dataset_basename}"))
+        resume_flag = "false"
+
+    # ─── Monkey-patch make_dataset (Đặc trưng của UMI Relative) ───
     sys.path.insert(0, BASE_DIR)
     from s3_umi_relative_wrapper import UMIRelativeDataset
     import lerobot.datasets.factory as factory
@@ -54,45 +80,59 @@ def main():
 
     factory.make_dataset = make_dataset_umi_relative
 
-    # --- Set CLI args for LeRobot's @parser.wrap() ---
+    # ─── Xây dựng CLI Arguments cho LeRobot ───
     sys.argv = [
         "lerobot_train",
         "--policy.type=diffusion",
+        
+        # Dataset
         "--dataset.repo_id=apicoo/robot_pick_place",
         f"--dataset.root={DATASET_DIR}",
-        "--steps=5000000",
-        "--batch_size=128",
+        
+        # Train config
+        f"--steps={args.steps}",
+        f"--batch_size={args.batch_size}",
         "--eval_freq=-1",
         "--save_freq=100000",
         "--save_checkpoint=true",
         "--log_freq=1000",
         "--seed=42",
         "--num_workers=16",
+        
+        # Optimizer
         "--optimizer.lr=1e-4",
         "--optimizer.weight_decay=1e-6",
         "--optimizer.grad_clip_norm=1.0",
+        
+        # Policy
         "--policy.device=cuda",
-        "--policy.vision_backbone=resnet18",
+        f"--policy.vision_backbone={args.backbone}",
         "--policy.n_obs_steps=2",
         "--policy.horizon=16",
         "--policy.n_action_steps=8",
         "--policy.num_train_timesteps=100",
+        
+        # IO
         f"--output_dir={OUTPUT_DIR}",
-        "--resume=false",
+        f"--resume={resume_flag}",
         "--wandb.enable=false",
         "--policy.push_to_hub=false",
-    ] + remaining_args
+    ]
+    
+    if resume_flag == "true":
+        sys.argv.append(f"--config_path={OUTPUT_DIR}/checkpoints/last/pretrained_model/train_config.json")
+        
+    sys.argv.extend(remaining_args)
 
-    print("=" * 60)
-    print("DIFFUSION POLICY + UMI RELATIVE-TO-CURRENT")
-    print("=" * 60)
-    print(f"Dataset:  {DATASET_DIR}")
-    print(f"Output:   {OUTPUT_DIR}")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print(f"🚀 BẮT ĐẦU HUẤN LUYỆN DIFFUSION POLICY (UMI RELATIVE) - {'RESUME' if resume_flag == 'true' else 'NEW'}")
+    print("=" * 70)
+    print(f"  Dataset: {DATASET_DIR}")
+    print(f"  Output : {OUTPUT_DIR}")
+    print("=" * 70 + "\n")
 
     from lerobot.scripts.lerobot_train import main as lerobot_main
     lerobot_main()
-
 
 if __name__ == "__main__":
     main()

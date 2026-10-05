@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-Tạo LeRobot Dataset (Tương Đối) từ dữ liệu gốc.
+Tạo LeRobot Dataset (hệ Tool_0) từ dữ liệu gốc.
 
 Chức năng:
   - Đồng bộ hóa dữ liệu từ FPC Camera, Side Camera, Gripper và SLAM.
   - Nội suy (interpolation) dữ liệu để đạt chuẩn target FPS.
-  - Lưu trạng thái Action và State dưới dạng tọa độ TƯƠNG ĐỐI (Relative to Frame 0).
+  - Lưu State/Action là pose tool TUYỆT ĐỐI trong hệ tool tại frame 0: inv(T_tool_0) @ T_tool_i
+    (gốc = Tool_0, state[0] = đơn vị). Đây KHÔNG phải UMI relative (UMI relative theo frame hiện tại
+    do s3_umi_relative_wrapper.py làm lúc train).
   - Tích hợp ghi đè hoặc nối tiếp (append) các episodes.
 """
 
 import os
-import glob
 import json
 import shutil
 from datetime import datetime
@@ -166,7 +167,7 @@ def load_and_interpolate_data(dataset_dir, target_fps):
         T_world_tool = T_world_cam @ T_tool_to_cam
         T_world_tool_list.append(T_world_tool)
         
-    # Bước 2: TƯƠNG ĐỐI HÓA - Lấy mốc frame 0 làm gốc
+    # Bước 2: Đổi sang hệ Tool_0 - Lấy pose tool tại frame 0 làm gốc
     T_world_tool_0_inv = np.linalg.inv(T_world_tool_list[0])
 
     for i in range(N):
@@ -235,7 +236,7 @@ def main():
     out_date_folder = datetime.now().strftime("Date_%d%m%Y")
     OUTPUT_DIR = os.path.join(BASE_DIR, "..", "S2_datasets_lerobot", out_date_folder, f"lerobot_dataset_fpccam_slam_{target_fps}fps_320x240_rel")
 
-    print(f"\nBắt đầu tạo LeRobot Dataset (TƯƠNG ĐỐI) cho Webcam ({target_fps} FPS - 320x240) từ {len(all_dirs)} episodes trong {source_date}...")
+    print(f"\nBắt đầu tạo LeRobot Dataset (hệ Tool_0) cho Webcam ({target_fps} FPS - 320x240) từ {len(all_dirs)} episodes trong {source_date}...")
     
     append_mode = False
     if os.path.exists(OUTPUT_DIR):

@@ -14,7 +14,7 @@ def main():
     # Danh sách các script cần chạy tuần tự
     scripts = [
         "s2_run_slam.py",
-        "s2.1_smooth_tracjectory.py",
+        "s2.1_create_trajectory.py",
         "s2.3_vizualize_aruco.py"
     ]
 

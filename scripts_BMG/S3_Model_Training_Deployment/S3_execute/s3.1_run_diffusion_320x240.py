@@ -1,10 +1,28 @@
 #!/usr/bin/env python3
+"""
+Diffusion Policy Inference trên Robot Indy7 (Cartesian SLAM - Tuyệt đối).
+
+Kiến trúc:
+  - Indy7Robot     → Điều khiển robot
+  - FPCCamera      → Camera đầu tay máy (Front view)
+  - RealSenseCamera→ Camera hông (Side view)
+  - ModbusGripper  → Điều khiển tay kẹp
+  - Inference Loop → Dự đoán mục tiêu SLAM (Chunk 8 steps) và nội suy quỹ đạo trơn tru.
+
+Thuật toán:
+  - Sử dụng Diffusion Policy dự đoán Chunk (n_action_steps = 8).
+  - Tọa độ mục tiêu được tính toán trong hệ quy chiếu tuyệt đối (Base Frame) dựa vào SLAM.
+  - Quỹ đạo được nội suy mềm mại thành 80 điểm (INTERP_STEPS) trước khi gửi tới robot.
+"""
+
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
 import time
 import threading
 import queue
-import os
 import argparse
-from pathlib import Path
+
 import numpy as np
 import cv2
 import pyrealsense2 as rs
@@ -12,36 +30,47 @@ from pymodbus.client import ModbusSerialClient
 import torch
 from scipy.spatial.transform import Rotation as R
 from neuromeka import IndyDCP3
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-
 from lerobot.policies.diffusion.modeling_diffusion import DiffusionPolicy
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+# ═══════════════════════════════════════════════════════════════
+# CONFIG
+# ═══════════════════════════════════════════════════════════════
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-#DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "S3_output", "Date_01102026", "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps_320x240", "checkpoints", "last", "pretrained_model")
-DEFAULT_POLICY_PATH = os.path.join(
-    BASE_DIR, "S3_output", "Date_01102026",
-    "diffusion_umi_rel_lerobot_dataset_fpccam_slam_10fps_320x240",
+DEFAULT_POLICY_PATH = os.path.join(      # Checkpoint ABSOLUTE (s3_train_diffusion.py), không dùng ckpt umi_rel
+    BASE_DIR, "S3_output", "Date_25092026",
+    "diffusion_checkpoints_lerobot_dataset_fpccam_slam_10fps_320x240",
     "checkpoints", "last", "pretrained_model"
 )
 
-GRIPPER_OPEN_MM = 100.0
-GRIPPER_CLOSE_MM = 10.0
-
-H, W = 540, 960
-TRAIN_FREQ = 10
-CHUNK_SIZE = 8
-INTERP_STEPS = 80
+# Robot
 ROBOT_IP = "192.168.2.100"
 
-# ============================================================
-# HARDWARE CLASSES
-# ============================================================
-class robot:
-    def __init__(self):
-        self.robot = IndyDCP3(ROBOT_IP)
+# Inference
+TRAIN_FREQ = 10              # Tần số khi train mô hình
+CHUNK_SIZE = 8               # Kích thước chunk
+INTERP_STEPS = 80            # Số lượng điểm nội suy để đi cho mượt
+NUM_DENOISE_STEPS = 16       # Giảm số bước denoise để tăng tốc
+
+# Camera
+IMG_SIZE = (320, 240)        # (width, height) resize cho model
+
+# An toàn
+MAX_TRANS_PER_STEP = 20.0    # mm
+MAX_ROT_PER_STEP = 5.0       # deg
+MIN_Z_HEIGHT = 10.0          # mm
+
+# Gripper
+GRIPPER_PORT = "/dev/ttyUSB0"
+GRIPPER_OPEN_MM = 100.0
+GRIPPER_CLOSE_MM = 10.0
+GRIPPER_COOLDOWN = 1.0       # giây
+
+# ═══════════════════════════════════════════════════════════════
+# HARDWARE: Robot
+# ═══════════════════════════════════════════════════════════════
+class Indy7Robot:
+    def __init__(self, ip=ROBOT_IP):
+        self.robot = IndyDCP3(ip)
         self.latest_p = np.zeros(6, dtype=np.float32)
         
         self.running = True
@@ -65,22 +94,22 @@ class robot:
                 try:
                     self.robot.movetelel_abs(
                         tpos=list(np.asarray(cmd, dtype=np.float32)),
-                        vel_ratio=0.1,  # Vận tốc an toàn
+                        vel_ratio=0.1,  
                         acc_ratio=1.0
                     )
                 except Exception as e:
-                    print(f"Robot command error: {e}")
+                    print(f"[Robot] Command error: {e}")
             try:
                 p = self.robot.get_robot_data()["p"]
                 with self.lock:
                     self.latest_p = np.array(p, dtype=np.float32)
                     self._last_read_ts = time.time()
-            except Exception as e:
-                print(f"Lỗi đọc data robot: {e}")
+            except Exception:
+                pass
             
             time.sleep(0.01)
 
-    def get_robot_data(self):
+    def get_pose(self):
         with self.lock:
             return self.latest_p.copy()
 
@@ -96,8 +125,17 @@ class robot:
         self.robot.stop_teleop()
         self.robot.stop_motion()
 
-    def send_task_target(self, p_target):
+    def send_target(self, p_target):
         self._cmd_queue.put(p_target)
+
+    def wait_teleop_ready(self, timeout=0.6):
+        """Đợi robot chuyển sang TELE_OP mode."""
+        for _ in range(int(timeout / 0.02)):
+            state = self.robot.get_robot_data().get("op_state", 0)
+            if state == 17:
+                return True
+            time.sleep(0.02)
+        return False
 
     def stop(self):
         self.running = False
@@ -106,13 +144,15 @@ class robot:
         except Exception:
             pass
 
-class fpc_camera:
+# ═══════════════════════════════════════════════════════════════
+# HARDWARE: Camera
+# ═══════════════════════════════════════════════════════════════
+class FPCCamera:
     def __init__(self, target_fps=30):
-        self.cam_id = find_webcam_id()
+        self.w, self.h = IMG_SIZE
+        self.cam_id = self._find_webcam_id()
         self.stream = None
         self.frame = None
-        self.frame_id = 0
-        self.grabbed = False
         self.stopped = False
         self.lock = threading.Lock()
         
@@ -123,42 +163,28 @@ class fpc_camera:
             self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
             self.stream.set(cv2.CAP_PROP_FPS, 30)
             self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 0)
-            (self.grabbed, self.frame) = self.stream.read()
-            self.start()
+            ok, frame = self.stream.read()
+            if ok:
+                self.frame = frame
+            
+            self.thread = threading.Thread(target=self._update, daemon=True)
+            self.thread.start()
 
-    def start(self):
-        self.thread = threading.Thread(target=self.update, daemon=True)
-        self.thread.start()
-        return self
-        
-    def update(self):
+    def _update(self):
         while not self.stopped and self.stream is not None:
-            (grabbed, frame) = self.stream.read()
-            if grabbed:
+            ok, frame = self.stream.read()
+            if ok:
                 with self.lock:
-                    self.grabbed = True
                     self.frame = frame
-                    self.frame_id += 1
             else:
-                self.grabbed = False
                 print("[WARNING] FPC Camera dropped a frame!")
-        
-    def read(self):
-        with self.lock:
-            if self.frame is not None:
-                return self.frame.copy(), self.frame_id
-            return None, -1
 
     def get_images(self):
         with self.lock:
             if self.frame is not None:
-                # Resize to 320x240
-                resized_frame = cv2.resize(self.frame, (320, 240))
-                # Convert BGR (from OpenCV) to RGB (for policy input)
-                #return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-            #return np.zeros((480, 640, 3), dtype=np.uint8)
-                return cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-            return np.zeros((240, 320, 3), dtype=np.uint8)
+                resized = cv2.resize(self.frame, (self.w, self.h))
+                return cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            return np.zeros((self.h, self.w, 3), dtype=np.uint8)
             
     def stop(self):
         self.stopped = True
@@ -170,70 +196,68 @@ class fpc_camera:
         if self.stream is not None:
             self.stream.release()
 
-class rs_camera:
+    @staticmethod
+    def _find_webcam_id():
+        import glob
+        video_paths = sorted(glob.glob('/sys/class/video4linux/video*'), 
+                           key=lambda x: int(os.path.basename(x).replace('video', '')))
+        for path in video_paths:
+            try:
+                with open(os.path.join(path, 'name'), 'r') as f:
+                    name = f.read().strip()
+                    if "RealSense" not in name and "Metadata" not in name:
+                        idx = int(os.path.basename(path).replace('video', ''))
+                        print(f"[INFO] Found FPC Webcam: '{name}' at /dev/video{idx}")
+                        return idx
+            except Exception:
+                continue
+        print("[WARNING] FPC Webcam not found!")
+        return None
+
+
+class RealSenseCamera:
     def __init__(self, target_fps=30):
+        self.w, self.h = IMG_SIZE
         self.pipeline = rs.pipeline()
         self.config = rs.config()
         self.config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
         self.pipeline.start(self.config)
         self.align = rs.align(rs.stream.color)
         self.frame = None
-        self.frame_id = 0
-        self.grabbed = False
         self.stopped = False
         self.lock = threading.Lock()
         
-        # Đợi camera ổn định và lấy frame đầu tiên
         for _ in range(10):
             frames = self.pipeline.wait_for_frames()
             aligned_frames = self.align.process(frames)
             color_frame = aligned_frames.get_color_frame()
             if color_frame:
                 self.frame = np.asanyarray(color_frame.get_data())
-                self.grabbed = True
                 break
-        self.start()
 
-    def start(self):
-        self.thread = threading.Thread(target=self.update, daemon=True)
+        self.thread = threading.Thread(target=self._update, daemon=True)
         self.thread.start()
-        return self
-        
-    def update(self):
+
+    def _update(self):
         while not self.stopped:
             try:
                 frames = self.pipeline.wait_for_frames(timeout_ms=1000)
                 aligned_frames = self.align.process(frames)
                 color_frame = aligned_frames.get_color_frame()
-                if not color_frame:
-                    continue
-                frame = np.asanyarray(color_frame.get_data())
-                with self.lock:
-                    self.grabbed = True
-                    self.frame = frame
-                    self.frame_id += 1
-            except Exception as e:
+                if color_frame:
+                    with self.lock:
+                        self.frame = np.asanyarray(color_frame.get_data())
+            except Exception:
                 pass
-                
-    # def get_images(self):
-    #     with self.lock:
-    #         if self.frame is not None:
-    #             return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-    #         return np.zeros((480, 640, 3), dtype=np.uint8)
-
+            time.sleep(1/60.0)
 
     def get_images(self):
         with self.lock:
             if self.frame is not None:
-                # Resize to 320x240
-                resized_frame = cv2.resize(self.frame, (320, 240))
-                # Convert BGR (from OpenCV) to RGB (for policy input)
-                #return cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-            #return np.zeros((480, 640, 3), dtype=np.uint8)
-                return cv2.cvtColor(resized_frame, cv2.COLOR_BGR2RGB)
-            return np.zeros((240, 320, 3), dtype=np.uint8)
+                resized = cv2.resize(self.frame, (self.w, self.h))
+                return cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+            return np.zeros((self.h, self.w, 3), dtype=np.uint8)
             
-
     def stop(self):
         self.stopped = True
         try:
@@ -246,10 +270,16 @@ class rs_camera:
         except Exception:
             pass
 
-class gripper:
-    def __init__(self):
+# ═══════════════════════════════════════════════════════════════
+# HARDWARE: Gripper
+# ═══════════════════════════════════════════════════════════════
+class ModbusGripper:
+    def __init__(self, port=GRIPPER_PORT, open_mm=GRIPPER_OPEN_MM, close_mm=GRIPPER_CLOSE_MM):
+        self.open_mm = open_mm
+        self.close_mm = close_mm
+        
         self.client = ModbusSerialClient(
-            port='/dev/ttyUSB0', baudrate=115200, stopbits=1,
+            port=port, baudrate=115200, stopbits=1,
             bytesize=8, parity='N', timeout=0.2, retries=0, handle_local_echo=False
         )
         self.client.connect()
@@ -280,7 +310,7 @@ class gripper:
                     res = self.client.read_input_registers(address=1, count=1, device_id=1)
                     if not res.isError():
                         pos_mm = float(res.registers[0])
-                        norm = np.clip((pos_mm - GRIPPER_CLOSE_MM) / (GRIPPER_OPEN_MM - GRIPPER_CLOSE_MM), 0.0, 1.0)
+                        norm = np.clip((pos_mm - self.close_mm) / (self.open_mm - self.close_mm), 0.0, 1.0)
                         with self._lock:
                             self.current_state = float(norm)
                 except Exception:
@@ -288,19 +318,17 @@ class gripper:
             time.sleep(0.01)
 
     def close(self):
-        self._cmd_queue.put(int(GRIPPER_CLOSE_MM))
+        self._cmd_queue.put(int(self.close_mm))
 
     def open(self):
-        self._cmd_queue.put(int(GRIPPER_OPEN_MM))
-
+        self._cmd_queue.put(int(self.open_mm))
+    
     def move(self, norm_pos):
-        # Đảm bảo giá trị nằm trong khoảng an toàn [0.0, 1.0]
         norm_pos = float(np.clip(norm_pos, 0.0, 1.0))
-        # norm_pos (0.0 đến 1.0) -> pos_mm
-        pos_mm = norm_pos * (GRIPPER_OPEN_MM - GRIPPER_CLOSE_MM) + GRIPPER_CLOSE_MM
+        pos_mm = norm_pos * (self.open_mm - self.close_mm) + self.close_mm
         self._cmd_queue.put(int(pos_mm))
 
-    def get_gripper_state(self):
+    def get_state(self):
         with self._lock:
             return self.current_state
 
@@ -315,140 +343,108 @@ class gripper:
         except Exception:
             pass
 
-def find_webcam_id():
-    import glob
-    video_paths = glob.glob('/sys/class/video4linux/video*')
-    video_paths.sort(key=lambda x: int(os.path.basename(x).replace('video', '')))
-    for path in video_paths:
-        try:
-            with open(os.path.join(path, 'name'), 'r') as f:
-                name = f.read().strip()
-                if "RealSense" not in name and "Metadata" not in name:
-                    idx = int(os.path.basename(path).replace('video', ''))
-                    print(f"[INFO] Tự động nhận diện Webcam: '{name}' tại /dev/video{idx}")
-                    return idx
-        except Exception:
-            continue
-    print("[WARNING] Không tìm thấy Webcam ngoài! Vui lòng kiểm tra cáp cắm.")
-    return None
-
-# ============================================================
+# ═══════════════════════════════════════════════════════════════
 # KINEMATICS & SAFETY
-# ============================================================
-def clamp_task_target(current_p, target_p, max_trans=20.0, max_rot=5.0):
-    """
-    Giới hạn bước di chuyển tối đa trong không gian Descartes để an toàn.
-    """
-    current_p = np.asarray(current_p, dtype=np.float32)
-    target_p = np.asarray(target_p, dtype=np.float32)
-    
-    # 1. Tịnh tiến (Translation in mm)
-    delta_trans = target_p[:3] - current_p[:3]
-    max_abs_trans = np.max(np.abs(delta_trans))
-    if max_abs_trans > max_trans:
-        scale_t = max_trans / max_abs_trans
-        scaled_trans = delta_trans * scale_t
-    else:
-        scaled_trans = delta_trans
+# ═══════════════════════════════════════════════════════════════
+class Kinematics:
+    @staticmethod
+    def clamp_target(current_p, target_p, max_trans=MAX_TRANS_PER_STEP, max_rot=MAX_ROT_PER_STEP):
+        current_p = np.asarray(current_p, dtype=np.float32)
+        target_p = np.asarray(target_p, dtype=np.float32)
         
-    # 2. Xoay (Rotation in deg)
-    delta_rot = (target_p[3:6] - current_p[3:6] + 180.0) % 360.0 - 180.0
-    max_abs_rot = np.max(np.abs(delta_rot))
-    if max_abs_rot > max_rot:
-        scale_r = max_rot / max_abs_rot
-        scaled_rot = delta_rot * scale_r
-    else:
-        scaled_rot = delta_rot
+        # Translation
+        delta_trans = target_p[:3] - current_p[:3]
+        max_abs_trans = np.max(np.abs(delta_trans))
+        if max_abs_trans > max_trans:
+            scaled_trans = delta_trans * (max_trans / max_abs_trans)
+        else:
+            scaled_trans = delta_trans
+            
+        # Rotation
+        delta_rot = (target_p[3:6] - current_p[3:6] + 180.0) % 360.0 - 180.0
+        max_abs_rot = np.max(np.abs(delta_rot))
+        if max_abs_rot > max_rot:
+            scaled_rot = delta_rot * (max_rot / max_abs_rot)
+        else:
+            scaled_rot = delta_rot
+            
+        safe_p = current_p.copy()
+        safe_p[:3] += scaled_trans
+        safe_p[3:6] = (current_p[3:6] + scaled_rot + 180.0) % 360.0 - 180.0
         
-    safe_p = current_p.copy()
-    safe_p[:3] += scaled_trans
-    safe_p[3:6] = (current_p[3:6] + scaled_rot + 180.0) % 360.0 - 180.0
-    
-    # 3. An toàn mặt bàn (Z >= 7.5mm)
-    if safe_p[2] < 10:
-        safe_p[2] = 10
+        if safe_p[2] < MIN_Z_HEIGHT:
+            safe_p[2] = MIN_Z_HEIGHT
+            
+        return safe_p
+
+    @staticmethod
+    def tcp_to_matrix(p):
+        T = np.eye(4)
+        r = R.from_euler('xyz', p[3:6], degrees=True)
+        T[:3, :3] = r.as_matrix()
+        T[:3, 3] = p[:3]
+        return T
+
+    @staticmethod
+    def get_closest_euler(target_eulers, current_eulers):
+        alt_eulers = np.array([
+            target_eulers[0] + 180.0,
+            180.0 - target_eulers[1],
+            target_eulers[2] + 180.0
+        ])
         
-    return safe_p
+        def angular_dist(a, b):
+            return np.linalg.norm((a - b + 180.0) % 360.0 - 180.0)
+            
+        dist1 = angular_dist(target_eulers, current_eulers)
+        dist2 = angular_dist(alt_eulers, current_eulers)
+        
+        chosen = alt_eulers if dist2 < dist1 else target_eulers
+        return (chosen + 180.0) % 360.0 - 180.0
 
-def tcp_to_matrix(p):
-    T = np.eye(4)
-    r = R.from_euler('xyz', p[3:6], degrees=True)
-    T[:3, :3] = r.as_matrix()
-    T[:3, 3] = p[:3]
-    return T
-
-def angular_dist(a, b):
-    diff = (a - b + 180.0) % 360.0 - 180.0
-    return np.linalg.norm(diff)
-
-def get_closest_euler(target_eulers, current_eulers):
-    """
-    Tìm bộ Euler (xyz) gần nhất với góc xoay hiện tại của Robot để tránh Gimbal Lock.
-    """
-    alt_eulers = np.array([
-        target_eulers[0] + 180.0,
-        180.0 - target_eulers[1],
-        target_eulers[2] + 180.0
-    ])
-    
-    dist1 = angular_dist(target_eulers, current_eulers)
-    dist2 = angular_dist(alt_eulers, current_eulers)
-    
-    if dist2 < dist1:
-        return (alt_eulers + 180.0) % 360.0 - 180.0
-    return (target_eulers + 180.0) % 360.0 - 180.0
-
-# ============================================================
-# MAIN INFERENCE LOOP
-# ============================================================
+# ═══════════════════════════════════════════════════════════════
+# MAIN
+# ═══════════════════════════════════════════════════════════════
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Diffusion Policy Inference (Cartesian SLAM Absolute)")
     parser.add_argument("--policy_path", type=str, default=DEFAULT_POLICY_PATH)
     parser.add_argument("--execute", action="store_true", help="Execute on physical robot")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
     print("\n" + "=" * 70)
-    print("🚀 DIFFUSION POLICY INFERENCE (CARTESIAN SLAM)")
+    print("🚀 DIFFUSION POLICY INFERENCE (CARTESIAN SLAM ABSOLUTE)")
     print("=" * 70)
 
     device = torch.device(args.device)
     
-    # Load Policy
-    print(f"Loading Diffusion model from: {args.policy_path}")
+    # ── 1. Load Model ─────────────────────────────────────────
+    print(f"\n[1/3] Loading Diffusion model: {args.policy_path}")
     policy = DiffusionPolicy.from_pretrained(args.policy_path, local_files_only=True)
-    
-    # Speed up inference by reducing denoising steps
-    policy.diffusion.num_inference_steps = 16
+    policy.diffusion.num_inference_steps = NUM_DENOISE_STEPS
     policy.to(device)
     policy.eval()
 
-    print("Loading Preprocessors...")
     from lerobot.policies.factory import make_pre_post_processors
     preprocessor, postprocessor = make_pre_post_processors(policy.config, pretrained_path=args.policy_path)
 
-    # Initialize Threads
-    print("Connecting to Indy7...")
-    indy = robot()
-    print("Connecting to SusGrip...")
-    susgrip = gripper()
-    print("Initializing FPC Camera (Front)...")
-    cam_fpc = fpc_camera(target_fps=30)
-    print("Initializing Realsense Camera (Side)...")
-    cam_rs = rs_camera(target_fps=30)
+    # ── 2. Khởi tạo Hardware ──────────────────────────────────
+    print("\n[2/3] Khởi tạo Hardware...")
+    indy = Indy7Robot()
+    susgrip = ModbusGripper()
+    cam_fpc = FPCCamera()
+    cam_rs = RealSenseCamera()
 
-    # Lấy vị trí ban đầu của Robot khi bắt đầu inference
-    time.sleep(1.0) # Đợi các luồng thu thập dữ liệu
-    p_tcp_0 = indy.get_robot_data()
-    print(f"Initial Robot Pose: {np.round(p_tcp_0, 2)}")
-    T_tcp_0 = tcp_to_matrix(p_tcp_0)
+    # Lấy vị trí ban đầu
+    time.sleep(1.0)
+    p_tcp_0 = indy.get_pose()
+    print(f"  [>] Initial Robot Pose: {np.round(p_tcp_0, 2)}")
+    T_tcp_0 = Kinematics.tcp_to_matrix(p_tcp_0)
     T_tcp_0_inv = np.linalg.inv(T_tcp_0)
 
-    # Hàm quy đổi T_tcp_curr sang AI Observation State (10D relative tool pose)
-    # Công thức: T_rel = inv(T_tcp_0) @ T_tcp_curr
-    # Dữ liệu training đã ở dạng relative tool trong hệ tool_0, robot báo TCP trực tiếp
     def get_obs_dict(p_tcp_curr, g_state, rgb_img, rgb_img_side):
-        T_tcp_curr = tcp_to_matrix(p_tcp_curr)
+        """Hàm quy đổi T_tcp_curr sang AI Observation State (10D relative tool pose tuyệt đối)"""
+        T_tcp_curr = Kinematics.tcp_to_matrix(p_tcp_curr)
         T_rel = T_tcp_0_inv @ T_tcp_curr
 
         pos = T_rel[:3, 3] / 1000.0  # mm -> m
@@ -471,59 +467,50 @@ def main():
             "observation.image_side": img_side_t,
         }
 
-    # Model CUDA Graph Warmup
-    print("Warming up CUDA Graph...")
-    dummy_obs = get_obs_dict(indy.get_robot_data(), susgrip.get_gripper_state(), cam_fpc.get_images(), cam_rs.get_images())
+    # Warmup
+    print("  [>] Warming up CUDA Graph...")
+    dummy_obs = get_obs_dict(indy.get_pose(), susgrip.get_state(), cam_fpc.get_images(), cam_rs.get_images())
     dummy_obs = preprocessor(dummy_obs)
     with torch.inference_mode():
         for _ in range(3):
             policy.select_action(dummy_obs)
-    print("Warmup complete.")
-    
+            
     if hasattr(policy, "reset"):
         policy.reset()
 
+    # ── 3. Mode & Bật Teleop ──────────────────────────────────
     if args.execute:
-        print("\n⚠️ [WARNING] EXECUTE MODE ACTIVE!")
-        confirm = input("Type 'YES' to transmit commands: ").strip()
-        if confirm != "YES":
+        print("\n[3/3] Chuẩn bị chạy...")
+        print("⚠️ [WARNING] EXECUTE MODE - Robot sẽ di chuyển thật!")
+        if input("Gõ 'YES' để tiếp tục: ").strip() != "YES":
+            print("Hủy.")
             return
             
-    
-    print(f"Starting inference loop...\n")
-
-    if args.execute:
-        print("Enabling Indy Teleop (Method 0)...")
         indy.start_teleop()
-        # Wait for TELE_OP transition
-        transition_success = False
-        print("Waiting for TELE_OP transition...")
-        for _ in range(30):
-            state = indy.robot.get_robot_data().get("op_state", 0)
-            if state == 17:
-                transition_success = True
-                print("✅ Robot successfully entered TELE_OP mode!")
-                break
-            time.sleep(0.02)
-    
-        if not transition_success:
-            print(f"❌ CRITICAL ERROR: Robot failed to enter TELE_OP mode (Mode {state}). Aborting.")
+        if not indy.wait_teleop_ready():
+            print("❌ Lỗi: Robot không thể vào chế độ TELE_OP.")
             return
+        print("✅ TELE_OP Ready!")
 
-        p_curr = indy.get_robot_data()
-        
-        # Keep-alive buffering
+        p_curr = indy.get_pose()
         for _ in range(10):
-            indy.send_task_target(p_curr)
+            indy.send_target(p_curr)
             time.sleep(0.01)
+    else:
+        print("\n[3/3] Chế độ DRY-RUN (chỉ log tọa độ, không chạy robot)")
 
-    frame_idx = 0
+    # ── Inference Loop ────────────────────────────────────────
+    print("\n" + "=" * 60)
+    print(f"INFERENCE & INTERPOLATION LOOP (Chunk={CHUNK_SIZE})")
+    print("Ctrl+C để dừng")
+    print("=" * 60 + "\n")
+
     last_g_cmd = "open"
     last_g_cmd_time = time.perf_counter()
 
     try:
         while True:
-            # 1. Force replan bằng cách xóa hàng đợi action (giữ nguyên lịch sử observation)
+            # Xóa hàng đợi action để force replan
             if hasattr(policy, "policy") and hasattr(policy.policy, "_queues"):
                 if "action" in policy.policy._queues:
                     policy.policy._queues["action"].clear()
@@ -533,9 +520,10 @@ def main():
             
             inf_start = time.perf_counter()
             
-            for step_i in range(CHUNK_SIZE):
-                p_phys_curr = indy.get_robot_data()
-                g_state = susgrip.get_gripper_state()
+            # ─── BƯỚC 1: DỰ ĐOÁN CHUNK 8 STEPS ───
+            for _ in range(CHUNK_SIZE):
+                p_phys_curr = indy.get_pose()
+                g_state = susgrip.get_state()
                 rgb_img = cam_fpc.get_images() 
                 rgb_img_side = cam_rs.get_images() 
                 
@@ -556,43 +544,36 @@ def main():
                     act_vec = act_vec[0]
                     
                 target_tx, target_ty, target_tz = act_vec[0], act_vec[1], act_vec[2]
-                v1 = act_vec[3:6]
-                v2 = act_vec[6:9]
+                v1, v2 = act_vec[3:6], act_vec[6:9]
                 g_cmd_target = act_vec[9]
                 
-                v1 = v1 / np.linalg.norm(v1)
                 v3 = np.cross(v1, v2)
-                v3 = v3 / np.linalg.norm(v3)
-                v2 = np.cross(v3, v1)
-                
                 R_mat = np.column_stack((v1, v2, v3))
 
-                # Quy đổi ngược: T_tcp_target = T_tcp_0 @ T_rel_predicted
+                # Quy đổi ngược
                 T_rel_target = np.eye(4)
                 T_rel_target[:3, :3] = R_mat
                 T_rel_target[:3, 3] = np.array([target_tx, target_ty, target_tz]) * 1000.0  # m -> mm
 
                 T_tcp_target = T_tcp_0 @ T_rel_target
-
                 target_x, target_y, target_z = T_tcp_target[:3, 3]
                 target_eulers = R.from_matrix(T_tcp_target[:3, :3]).as_euler('xyz', degrees=True)
-                target_eulers = get_closest_euler(target_eulers, p_phys_curr[3:6])
-                target_u, target_v, target_w = target_eulers[0], target_eulers[1], target_eulers[2]
+                target_eulers = Kinematics.get_closest_euler(target_eulers, p_phys_curr[3:6])
 
-                p_target_phys = np.array([target_x, target_y, target_z, target_u, target_v, target_w], dtype=np.float32)
+                p_target_phys = np.array([target_x, target_y, target_z, *target_eulers], dtype=np.float32)
                 
                 chunk_p_phys.append(p_target_phys)
                 chunk_g_cmd.append(g_cmd_target)
                 
             inf_time = time.perf_counter() - inf_start
-            print(f"[AI] Inference & extraction of {CHUNK_SIZE} points took: {inf_time:.3f} s")
+            print(f"[AI] Inference {CHUNK_SIZE} steps: {inf_time:.3f} s")
             
-            # 2. Nội suy quỹ đạo từ CHUNK_SIZE lên INTERP_STEPS
+            # ─── BƯỚC 2: NỘI SUY (INTERPOLATION) ───
             chunk_p_phys = np.array(chunk_p_phys)
             chunk_g_cmd = np.array(chunk_g_cmd)
             
-            p_phys_curr_neo = indy.get_robot_data()
-            g_state_neo = susgrip.get_gripper_state()
+            p_phys_curr_neo = indy.get_pose()
+            g_state_neo = susgrip.get_state()
             
             chunk_p_phys = np.vstack([p_phys_curr_neo, chunk_p_phys])
             chunk_g_cmd = np.insert(chunk_g_cmd, 0, g_state_neo)
@@ -601,14 +582,15 @@ def main():
             interp_t = np.linspace(0, 1, INTERP_STEPS)
             
             interp_p_phys = np.zeros((INTERP_STEPS, 6), dtype=np.float32)
-            # 1. Dịch chuyển (X, Y, Z)
+            
+            # Nội suy Translation
             for i in range(3):
                 interp_p_phys[:, i] = np.interp(interp_t, orig_t, chunk_p_phys[:, i])
-            # 2. Góc xoay (U, V, W) - Unwrap góc trước khi nội suy
+                
+            # Nội suy Rotation (Unwrap)
             for i in range(3, 6):
                 angles = chunk_p_phys[:, i]
-                diffs = np.diff(angles)
-                diffs = (diffs + 180.0) % 360.0 - 180.0
+                diffs = (np.diff(angles) + 180.0) % 360.0 - 180.0
                 unwrapped_angles = np.zeros_like(angles)
                 unwrapped_angles[0] = angles[0]
                 for j in range(1, len(angles)):
@@ -618,41 +600,30 @@ def main():
                 
             interp_g_cmd = np.interp(interp_t, orig_t, chunk_g_cmd)
             
-            # 3. Gửi lần lượt các điểm đã nội suy xuống robot
-            chunk_duration = CHUNK_SIZE / TRAIN_FREQ
+            # ─── BƯỚC 3: GỬI LỆNH LẦN LƯỢT ───
             exec_dt = 0.02
             a = time.perf_counter()
-            SKIP_POINTS = 0
-            for i in range(SKIP_POINTS, INTERP_STEPS):
+            for i in range(INTERP_STEPS):
                 loop_start = time.perf_counter()
                 
                 target_p = interp_p_phys[i]
                 target_g = interp_g_cmd[i]
                 
-                p_phys_curr = indy.get_robot_data()
+                p_phys_curr = indy.get_pose()
+                p_safe_phys = Kinematics.clamp_target(p_phys_curr, target_p)
                 
-                p_safe_phys = clamp_task_target(p_phys_curr, target_p, max_trans=20.0, max_rot=5.0)
-                
-                print(f"Executing {i+1}/{INTERP_STEPS} | Target: {np.round(target_p, 1)} | Grip: {target_g:.2f}")
+                print(f"  Executing {i+1:02d}/{INTERP_STEPS} | Target: {np.round(target_p[:3], 1)} | Grip: {target_g:.2f}")
                 
                 if args.execute:
                     try:
-                        indy.send_task_target(p_safe_phys)
-                        if target_g < 0.5:
-                            new_g_cmd = "close"
-                        else:
-                            new_g_cmd = "open"
+                        indy.send_target(p_safe_phys)
+                        new_g_cmd = "close" if target_g < 0.5 else "open"
                             
-                        # Lọc theo thời gian tồn tại của trạng thái thực tế (Cooldown Filter)
+                        # Cooldown Filter Gripper
                         if new_g_cmd != last_g_cmd:
                             current_time = time.perf_counter()
-                            # Kiểm tra xem trạng thái cũ đã tồn tại đủ 0.75s chưa
-                            if (current_time - last_g_cmd_time) >= 1.0:
-                                if new_g_cmd == "close":
-                                    susgrip.close()
-                                else:
-                                    susgrip.open()
-                                # Lật trạng thái và reset đồng hồ đếm
+                            if (current_time - last_g_cmd_time) >= GRIPPER_COOLDOWN:
+                                susgrip.close() if new_g_cmd == "close" else susgrip.open()
                                 last_g_cmd = new_g_cmd
                                 last_g_cmd_time = current_time
                     except Exception as e:
@@ -662,26 +633,23 @@ def main():
                 elapsed = time.perf_counter() - loop_start
                 if elapsed < exec_dt:
                     time.sleep(exec_dt - elapsed)
-            print(f"Execution time: {time.perf_counter()-a}")      
-            # 4. Chờ robot di chuyển tới điểm cuối của quỹ đạo (so sánh sai số)
+            print(f"  [>] Execution time: {time.perf_counter()-a:.3f} s")
+            
+            # ─── BƯỚC 4: WAIT FOR TARGET ───
             if args.execute:
                 final_p = interp_p_phys[-1]
-                print(f"Waiting for robot to reach target... {np.round(final_p, 1)}")
-                
                 wait_start = time.perf_counter()
                 while True:
-                    p_phys_curr = indy.get_robot_data()
-                    
+                    p_phys_curr = indy.get_pose()
                     err_trans = np.linalg.norm(p_phys_curr[:3] - final_p[:3])
                     err_rot = np.linalg.norm((p_phys_curr[3:6] - final_p[3:6] + 180) % 360 - 180)
                     
-                    if err_trans < 1.0 and err_rot < 1.0: # Đã nới lỏng: 3mm, 2 độ
-                        print(f"Target reached! Err_Trans: {err_trans:.1f}mm, Err_Rot: {err_rot:.1f}deg")
+                    if err_trans < 1.0 and err_rot < 1.0:
+                        print(f"  [v] Target reached! Err: {err_trans:.1f}mm, {err_rot:.1f}deg")
                         break
                         
-                    # Thêm timeout chống kẹt (Tối đa 0.5s)
                     if time.perf_counter() - wait_start > 0.5:
-                        print(f"Wait timeout! Moving to next prediction (Err: {err_trans:.1f}mm, {err_rot:.1f}deg)")
+                        print(f"  [x] Wait timeout! Err: {err_trans:.1f}mm, {err_rot:.1f}deg")
                         break
                     
                     time.sleep(0.01)
@@ -693,7 +661,6 @@ def main():
         try: indy.stop()
         except: pass
         if args.execute:
-            print("Disabling Teleop...")
             try: indy.stop_teleop()
             except: pass
         susgrip.stop()

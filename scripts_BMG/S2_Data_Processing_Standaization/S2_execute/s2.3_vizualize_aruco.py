@@ -24,6 +24,8 @@ matplotlib.use('TkAgg') # Bắt buộc dùng TkAgg cho giao diện tương tác
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
+from s2_menu import choose_path
+
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
@@ -262,7 +264,7 @@ def _plot_from_csv(csv_path, out_img, title, no_show):
     plt.close(fig)
 
 # ═══════════════════════════════════════════════════════════════
-# INTERACTIVE LABELER (Bult-in)
+# INTERACTIVE LABELER (Built-in)
 # ═══════════════════════════════════════════════════════════════
 def interactive_labeler(date_dir_path):
     date_dir = os.path.join(S2_OUTPUT_DIR, date_dir_path)
@@ -377,16 +379,21 @@ def interactive_labeler(date_dir_path):
 # ═══════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="Trực quan hóa SLAM trong hệ tọa độ ArUco Marker")
-    parser.add_argument("--path", required=True, help="Đường dẫn đến dataset hoặc thư mục Date")
+    parser.add_argument("--path", default=None, help="Đường dẫn đến dataset hoặc thư mục Date. Bỏ trống để mở menu chọn")
     parser.add_argument("--no_show", action="store_true", help="Không hiển thị ảnh (chỉ lưu)")
     parser.add_argument("--num_frames", type=int, default=100, help="Số frame đầu tiên để quét tìm Marker")
     args = parser.parse_args()
 
-    target_path = os.path.join(S1_OUTPUT_DIR, args.path)
-    
+    rel_path = args.path or choose_path(S1_OUTPUT_DIR)
+    if not rel_path:
+        print("[!] Không có lựa chọn hợp lệ!")
+        sys.exit(1)
+
+    target_path = os.path.join(S1_OUTPUT_DIR, rel_path)
+
     if not os.path.exists(target_path):
         # Fallback thử kiểm tra S2_OUTPUT_DIR (do trước đó người dùng truyền nhầm đường dẫn)
-        target_path_s2 = os.path.join(S2_OUTPUT_DIR, args.path)
+        target_path_s2 = os.path.join(S2_OUTPUT_DIR, rel_path)
         if os.path.exists(target_path_s2):
             target_path = target_path_s2
         else:
@@ -396,12 +403,12 @@ def main():
     # Nếu là 1 dataset
     if os.path.basename(target_path).startswith("dataset_"):
         print(f"\n>>> CHẾ ĐỘ: XỬ LÝ 1 DATASET <<<")
-        process_single_dataset(args.path, args.num_frames, args.no_show)
+        process_single_dataset(rel_path, args.num_frames, args.no_show)
     
     # Nếu là thư mục Date (chứa nhiều dataset) -> Bật chế độ đánh giá tương tác
     else:
         print(f"\n>>> CHẾ ĐỘ: ĐÁNH GIÁ TƯƠNG TÁC HÀNG LOẠT <<<")
-        interactive_labeler(args.path)
+        interactive_labeler(rel_path)
 
     print("\n>>> HOÀN THÀNH! <<<")
 

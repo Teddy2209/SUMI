@@ -19,6 +19,8 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation as R
 
+from s2_menu import choose_path
+
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════
@@ -167,10 +169,15 @@ def _plot_comparison(original, smoothed, output_file):
 # ═══════════════════════════════════════════════════════════════
 def main():
     parser = argparse.ArgumentParser(description="Tạo và làm mượt quỹ đạo SLAM")
-    parser.add_argument("--path", required=True, help="Relative path to a dataset OR a Date folder (e.g. Date_27082026/dataset_104821 OR Date_27082026)")
+    parser.add_argument("--path", default=None, help="Relative path to a dataset OR a Date folder (e.g. Date_27082026/dataset_104821 OR Date_27082026). Bỏ trống để mở menu chọn")
     args = parser.parse_args()
 
-    target_path = os.path.join(S2_OUTPUT_DIR, args.path)
+    rel_path = args.path or choose_path(S2_OUTPUT_DIR)
+    if not rel_path:
+        print("[!] Không có lựa chọn hợp lệ!")
+        sys.exit(1)
+
+    target_path = os.path.join(S2_OUTPUT_DIR, rel_path)
     if not os.path.exists(target_path):
         print(f"[!] Lỗi: Không tìm thấy thư mục SLAM output: {target_path}")
         sys.exit(1)
