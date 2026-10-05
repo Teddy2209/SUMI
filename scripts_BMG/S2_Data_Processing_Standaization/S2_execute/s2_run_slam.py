@@ -1,37 +1,53 @@
+#!/usr/bin/env python3
+"""
+Chạy ORB-SLAM3 trên dữ liệu.
+
+Chức năng:
+  - Khởi chạy ORB-SLAM3 với file cấu hình và từ vựng.
+  - Tự động dừng SLAM khi lưu xong quỹ đạo.
+  - Hỗ trợ chạy 1 dataset lẻ hoặc chạy hàng loạt toàn bộ thư mục Date.
+"""
+
 import argparse
 import subprocess
 import os
+import sys
 import shutil
 import time
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--path", required=True, help="Relative path to dataset (e.g. Date_27082026/dataset_104821)")
-    args = parser.parse_args()
+# ═══════════════════════════════════════════════════════════════
+# CONFIGURATION
+# ═══════════════════════════════════════════════════════════════
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ROOT_DIR giờ là thư mục SUMI
+ORB_SLAM3_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "..", ".."))
 
-    # Đường dẫn tương đối từ file script
-    # S2_execute -> S2_Data_Processing -> scripts_BMG -> SUMI (chính là gốc của ORB-SLAM3)
-    S2_EXEC_DIR = os.path.dirname(os.path.abspath(__file__))
-    
-    # ROOT_DIR giờ là thư mục SUMI
-    ORB_SLAM3_DIR = os.path.abspath(os.path.join(S2_EXEC_DIR, "..", "..", ".."))
-    
-    # S1_Data_Collection nằm trong scripts_BMG
-    S1_OUTPUT_DIR = os.path.abspath(os.path.join(S2_EXEC_DIR, "..", "..", "S1_Data_Collection", "S1_output"))
-    S2_OUTPUT_DIR = os.path.abspath(os.path.join(S2_EXEC_DIR, "..", "S2_output_slam"))
-    
-    input_dataset_dir = os.path.join(S1_OUTPUT_DIR, args.path)
-    output_dataset_dir = os.path.join(S2_OUTPUT_DIR, args.path)
+S1_OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "..", "S1_Data_Collection", "S1_output"))
+S2_OUTPUT_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "S2_output_slam"))
+
+# ═══════════════════════════════════════════════════════════════
+# CORE PROCESSING
+# ═══════════════════════════════════════════════════════════════
+def run_slam_for_dataset(ds_rel_path):
+    input_dataset_dir = os.path.join(S1_OUTPUT_DIR, ds_rel_path)
+    output_dataset_dir = os.path.join(S2_OUTPUT_DIR, ds_rel_path)
     
     if not os.path.exists(input_dataset_dir):
-        print(f"Lỗi: Không tìm thấy thư mục input: {input_dataset_dir}")
-        return
-
+        print(f"[-] Lỗi: Không tìm thấy thư mục input: {input_dataset_dir}")
+        return False
+        
     os.makedirs(output_dataset_dir, exist_ok=True)
     
-    print(f"\n>>> BẮT ĐẦU CHẠY ORB-SLAM3 CHO DATASET: {args.path} <<<")
-    print(f"Input: {input_dataset_dir}")
-    print(f"Output: {output_dataset_dir}")
+    camera_traj_dst = os.path.join(output_dataset_dir, "CameraTrajectory.txt")
+    keyframe_traj_dst = os.path.join(output_dataset_dir, "KeyFrameTrajectory.txt")
+    
+    if os.path.exists(camera_traj_dst):
+        print(f"[-] Bỏ qua {ds_rel_path}: Đã có CameraTrajectory.txt")
+        return True
+
+    print(f"\n" + "="*50)
+    print(f">>> BẮT ĐẦU CHẠY ORB-SLAM3 CHO DATASET: {ds_rel_path} <<<")
+    print(f"=======================================================")
     
     slam_cmd = [
         "./Examples/RGB-D/rgbd_tum",
@@ -42,18 +58,17 @@ def main():
     ]
     
     try:
-        # Thiết lập biến môi trường để trỏ tới file libORB_SLAM3.so
         env = os.environ.copy()
         lib_path = os.path.join(ORB_SLAM3_DIR, "lib")
         dbow2_path = os.path.join(ORB_SLAM3_DIR, "Thirdparty", "DBoW2", "lib")
         g2o_path = os.path.join(ORB_SLAM3_DIR, "Thirdparty", "g2o", "lib")
         extra_paths = f"{lib_path}:{dbow2_path}:{g2o_path}"
+        
         if "LD_LIBRARY_PATH" in env:
             env["LD_LIBRARY_PATH"] = f"{extra_paths}:{env['LD_LIBRARY_PATH']}"
         else:
             env["LD_LIBRARY_PATH"] = extra_paths
             
-        # Chạy SLAM. Dùng Popen để theo dõi log, tự động Force Kill khi đã lưu file xong
         process = subprocess.Popen(slam_cmd, cwd=ORB_SLAM3_DIR, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env)
         
         while True:
@@ -73,22 +88,55 @@ def main():
         camera_traj_src = os.path.join(ORB_SLAM3_DIR, "CameraTrajectory.txt")
         keyframe_traj_src = os.path.join(ORB_SLAM3_DIR, "KeyFrameTrajectory.txt")
         
-        camera_traj_dst = os.path.join(output_dataset_dir, "CameraTrajectory.txt")
-        keyframe_traj_dst = os.path.join(output_dataset_dir, "KeyFrameTrajectory.txt")
-        
         if os.path.exists(camera_traj_src):
             shutil.move(camera_traj_src, camera_traj_dst)
             print(f"\n[+] Đã lưu quỹ đạo thô vào: {camera_traj_dst}")
         else:
-            print("\n[!] Cảnh báo: Không tìm thấy CameraTrajectory.txt, có thể SLAM đã thất bại hoàn toàn.")
+            print(f"\n[!] Cảnh báo: Không tìm thấy CameraTrajectory.txt, SLAM thất bại cho {ds_rel_path}")
             
         if os.path.exists(keyframe_traj_src):
             shutil.move(keyframe_traj_src, keyframe_traj_dst)
             
-        print(">>> HOÀN THÀNH CHẠY SLAM VÀ LƯU DỮ LIỆU! <<<")
-        
+        return True
     except Exception as e:
-        print(f"Lỗi chạy SLAM: {e}")
+        print(f"Lỗi chạy SLAM cho {ds_rel_path}: {e}")
+        return False
+
+# ═══════════════════════════════════════════════════════════════
+# MAIN ROUTING
+# ═══════════════════════════════════════════════════════════════
+def main():
+    parser = argparse.ArgumentParser(description="Khởi chạy ORB-SLAM3")
+    parser.add_argument("--path", required=True, help="Đường dẫn đến dataset hoặc thư mục Date (VD: Date_27082026/dataset_104821 OR Date_27082026)")
+    args = parser.parse_args()
+
+    target_path = os.path.join(S1_OUTPUT_DIR, args.path)
+    
+    if not os.path.exists(target_path):
+        print(f"[!] Lỗi: Không tìm thấy thư mục input: {target_path}")
+        sys.exit(1)
+
+    # Nếu là 1 dataset
+    if os.path.basename(target_path).startswith("dataset_"):
+        print(f"\n>>> CHẾ ĐỘ: CHẠY SLAM CHO 1 DATASET <<<")
+        run_slam_for_dataset(args.path)
+    
+    # Nếu là thư mục Date (chứa nhiều dataset)
+    else:
+        datasets = [d for d in os.listdir(target_path) if os.path.isdir(os.path.join(target_path, d)) and d.startswith("dataset_")]
+        datasets.sort()
+        
+        if not datasets:
+            print(f"[!] Không tìm thấy dataset nào trong {target_path}")
+            sys.exit(1)
+            
+        print(f"\n>>> CHẾ ĐỘ: CHẠY HÀNG LOẠT ({len(datasets)} datasets) <<<")
+        
+        for ds_name in datasets:
+            rel_path = os.path.join(args.path, ds_name)
+            run_slam_for_dataset(rel_path)
+
+    print("\n>>> HOÀN THÀNH CHẠY BATCH SLAM! <<<")
 
 if __name__ == "__main__":
     main()

@@ -20,7 +20,7 @@ from lerobot.policies.act.modeling_act import ACTPolicy
 # CONFIGURATION
 # ============================================================
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "act_checkpoints_act_slam_v2", "checkpoints", "last", "pretrained_model")
+DEFAULT_POLICY_PATH = os.path.join(BASE_DIR, "output_trained", "act_checkpoints_act_slam", "checkpoints", "last", "pretrained_model")
 CALIB_FILE = os.path.join(BASE_DIR, "test", "eye_in_hand_result.json")
 
 GRIPPER_OPEN_MM = 120.0
