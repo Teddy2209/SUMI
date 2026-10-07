@@ -58,6 +58,9 @@ def main():
     if args.resume_dir:
         OUTPUT_DIR = os.path.abspath(args.resume_dir)
         resume_flag = "true"
+        if not os.path.exists(f"{OUTPUT_DIR}/checkpoints/last/pretrained_model/train_config.json"):
+            print(f"❌ Lỗi: Không có checkpoint để resume tại {OUTPUT_DIR} (đường dẫn tương đối tính từ thư mục hiện tại).")
+            sys.exit(1)
     else:
         out_date_folder = datetime.now().strftime("Date_%d%m%Y")
         dataset_basename = os.path.basename(args.dataset_name)
