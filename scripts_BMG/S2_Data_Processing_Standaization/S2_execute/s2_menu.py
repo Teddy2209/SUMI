@@ -27,6 +27,19 @@ def _list_dirs(parent, prefix):
                   if d.startswith(prefix) and os.path.isdir(os.path.join(parent, d)))
 
 
+def ask_overwrite(existing):
+    """
+    Hỏi trước khi chạy khi đã có dữ liệu. Trả về True = ghi đè tất cả, False = bỏ qua các dataset đã có
+    (chỉ xử lý dataset chưa có; nếu không còn gì thì kết thúc). Nhập sai → bỏ qua (an toàn).
+    """
+    print(f"\n[!] Đã có dữ liệu cho {len(existing)} dataset:")
+    for name in existing:
+        print(f"  - {name}")
+    print("1. Bỏ qua (giữ dữ liệu cũ)")
+    print("2. Ghi đè dữ liệu")
+    return input("Chọn số tương ứng (1-2): ").strip() == "2"
+
+
 def choose_path(root_dir):
     """
     Menu tương tác trong root_dir (S1_output hoặc S2_output_slam).

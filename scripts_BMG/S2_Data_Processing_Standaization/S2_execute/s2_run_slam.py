@@ -15,7 +15,7 @@ import sys
 import shutil
 import time
 
-from s2_menu import choose_path
+from s2_menu import ask_overwrite, choose_path
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -42,10 +42,6 @@ def run_slam_for_dataset(ds_rel_path):
     
     camera_traj_dst = os.path.join(output_dataset_dir, "CameraTrajectory.txt")
     keyframe_traj_dst = os.path.join(output_dataset_dir, "KeyFrameTrajectory.txt")
-    
-    if os.path.exists(camera_traj_dst):
-        print(f"[-] Bỏ qua {ds_rel_path}: Đã có CameraTrajectory.txt")
-        return True
 
     print(f"\n" + "="*50)
     print(f">>> BẮT ĐẦU CHẠY ORB-SLAM3 CHO DATASET: {ds_rel_path} <<<")
@@ -123,24 +119,26 @@ def main():
         print(f"[!] Lỗi: Không tìm thấy thư mục input: {target_path}")
         sys.exit(1)
 
-    # Nếu là 1 dataset
+    # 1 dataset hoặc cả thư mục Date (chứa nhiều dataset)
     if os.path.basename(target_path).startswith("dataset_"):
         print(f"\n>>> CHẾ ĐỘ: CHẠY SLAM CHO 1 DATASET <<<")
-        run_slam_for_dataset(rel_path)
-    
-    # Nếu là thư mục Date (chứa nhiều dataset)
+        ds_list = [rel_path]
     else:
-        datasets = [d for d in os.listdir(target_path) if os.path.isdir(os.path.join(target_path, d)) and d.startswith("dataset_")]
-        datasets.sort()
-        
+        datasets = sorted(d for d in os.listdir(target_path) if os.path.isdir(os.path.join(target_path, d)) and d.startswith("dataset_"))
         if not datasets:
             print(f"[!] Không tìm thấy dataset nào trong {target_path}")
             sys.exit(1)
-            
         print(f"\n>>> CHẾ ĐỘ: CHẠY HÀNG LOẠT ({len(datasets)} datasets) <<<")
-        
-        for ds_name in datasets:
-            run_slam_for_dataset(os.path.join(rel_path, ds_name))
+        ds_list = [os.path.join(rel_path, d) for d in datasets]
+
+    # Đã có dữ liệu → hỏi bỏ qua / ghi đè trước khi chạy
+    done = [p for p in ds_list if os.path.exists(os.path.join(S2_OUTPUT_DIR, p, "CameraTrajectory.txt"))]
+    if done and not ask_overwrite(done):
+        ds_list = [p for p in ds_list if p not in done]
+        print(f"[-] Bỏ qua {len(done)} dataset đã có dữ liệu.")
+
+    for ds in ds_list:
+        run_slam_for_dataset(ds)
 
     print("\n>>> HOÀN THÀNH CHẠY BATCH SLAM! <<<")
 

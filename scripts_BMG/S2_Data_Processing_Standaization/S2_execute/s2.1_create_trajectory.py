@@ -19,7 +19,7 @@ from mpl_toolkits.mplot3d import Axes3D
 from scipy.signal import savgol_filter
 from scipy.spatial.transform import Rotation as R
 
-from s2_menu import choose_path
+from s2_menu import ask_overwrite, choose_path
 
 # ═══════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -198,6 +198,13 @@ def main():
     if not datasets:
         print(f"[!] Không tìm thấy dataset nào trong {target_path}")
         sys.exit(1)
+
+    # Đã có dữ liệu → hỏi bỏ qua / ghi đè trước khi chạy
+    done = [os.path.basename(p) for p in datasets
+            if os.path.exists(os.path.join(p, "CameraTrajectory.txt")) and os.path.exists(os.path.join(p, "SmoothedCameraTrajectory.txt"))]
+    if done and not ask_overwrite(done):
+        datasets = [p for p in datasets if os.path.basename(p) not in done]
+        print(f"[-] Bỏ qua {len(done)} dataset đã có dữ liệu.")
 
     for ds_path in datasets:
         ds_name = os.path.basename(ds_path)
